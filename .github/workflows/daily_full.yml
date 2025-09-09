@@ -35,37 +35,55 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Force IPv4 to Supabase
+      - name: Force IPv4 & patch DATABASE_URL
         env:
           DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           python3 - <<'PY'
-          import os, urllib.parse, socket, sys
-          db_url = os.environ.get('DB_URL', '')
-          print(f"[IPv4] DB_URL length={len(db_url)}")
-          if not db_url:
-              print("[IPv4] ERROR: DB_URL not provided"); sys.exit(0)
-          u = urllib.parse.urlparse(db_url)
+          import os, urllib.parse as up, socket
+          db = os.environ.get('DB_URL','')
+          print(f"[IPv4] url len={len(db)}")
+          u = up.urlparse(db)
           host = u.hostname or ''
-          print(f"[IPv4] host={host}")
-          if not host:
-              print("[IPv4] ERROR: cannot parse host from DB_URL"); sys.exit(0)
           ipv4 = None
           try:
-              for fam, stype, proto, cname, sockaddr in socket.getaddrinfo(host, None, socket.AF_INET):
-                  ipv4 = sockaddr[0]; break
+              for fam, st, pr, cn, sa in socket.getaddrinfo(host, None, socket.AF_INET):
+                  ipv4 = sa[0]; break
           except Exception as e:
-              print(f"[IPv4] getaddrinfo error: {e}")
+              print("[IPv4] getaddrinfo err:", e)
           if ipv4:
-              print(f"[IPv4] resolved IPv4={ipv4}")
+              print("[IPv4] resolved:", ipv4)
               with open(os.environ['GITHUB_ENV'],'a') as f:
                   f.write(f"PGHOSTADDR={ipv4}\n")
+              q = up.parse_qsl(u.query, keep_blank_values=True)
+              q = [(k,v) for k,v in q if k != 'hostaddr']
+              q.append(("hostaddr", ipv4))
+              new_q = up.urlencode(q)
+              netloc = u.netloc
+              new = up.urlunparse((u.scheme, netloc, u.path, u.params, new_q, u.fragment))
+              with open(os.environ['GITHUB_ENV'],'a') as f:
+                  f.write(f"DATABASE_URL={new}\n")
+              print("[IPv4] patched DATABASE_URL with hostaddr")
           else:
-              print("[IPv4] WARNING: no A record found; PGHOSTADDR not set (runner可能無法連線IPv6)")
+              print("[IPv4] WARNING: no IPv4 A record; connection may fail on IPv6-only runner")
+          PY
+
+      - name: DB smoke test (prints server addr:port)
+        run: |
+          python - <<'PY'
+          import os, psycopg2
+          dsn = os.environ['DATABASE_URL']
+          try:
+              with psycopg2.connect(dsn, connect_timeout=10) as conn:
+                  with conn.cursor() as cur:
+                      cur.execute("select inet_server_addr()::text, inet_server_port()")
+                      print("[DB]", cur.fetchone())
+          except Exception as e:
+              print("[DB] connect failed:", e); raise
           PY
 
       - name: Run Dataupsert (Full backfill)
         env:
           CG_API_KEY: ${{ secrets.CG_API_KEY }}
-          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DATABASE_URL: ${{ env.DATABASE_URL }}
         run: python Dataupsert.py
