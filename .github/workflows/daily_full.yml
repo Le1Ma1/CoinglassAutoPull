@@ -2,88 +2,60 @@ name: Coinglass Full T+1
 
 on:
   schedule:
-    - cron: '20 2 * * *'  # 02:20 UTC
+    - cron: '20 2 * * *'   # 02:20 UTC
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: coinglass-full
-  cancel-in-progress: true
+env:
+  CG_API_KEY: ${{ secrets.CG_API_KEY }}
+  DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+  CG_QPM: '80'    # 全速
+  START_DATE: '2015-01-01'
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 420
-    env:
-      CG_API_KEY: ${{ secrets.CG_API_KEY }}
-      DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
-      CG_QPM: '80'
-      START_DATE: '2015-01-01'
-      PGCONNECT_TIMEOUT: '20'
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    timeout-minutes: 360
+    concurrency:
+      group: coinglass-full
+      cancel-in-progress: false
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          cache: pip
 
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Force IPv4 & patch DATABASE_URL
-        env:
-          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      - name: Force IPv4 & append hostaddr to DSN
+        shell: bash
         run: |
-          python3 - <<'PY'
-          import os, urllib.parse as up, socket
-          db = os.environ.get('DB_URL','')
-          print(f"[IPv4] url len={len(db)}")
-          u = up.urlparse(db)
-          host = u.hostname or ''
-          ipv4 = None
-          try:
-              for fam, st, pr, cn, sa in socket.getaddrinfo(host, None, socket.AF_INET):
-                  ipv4 = sa[0]; break
-          except Exception as e:
-              print("[IPv4] getaddrinfo err:", e)
-          if ipv4:
-              print("[IPv4] resolved:", ipv4)
-              with open(os.environ['GITHUB_ENV'],'a') as f:
-                  f.write(f"PGHOSTADDR={ipv4}\n")
-              q = up.parse_qsl(u.query, keep_blank_values=True)
-              q = [(k,v) for k,v in q if k != 'hostaddr']
-              q.append(("hostaddr", ipv4))
-              new_q = up.urlencode(q)
-              netloc = u.netloc
-              new = up.urlunparse((u.scheme, netloc, u.path, u.params, new_q, u.fragment))
-              with open(os.environ['GITHUB_ENV'],'a') as f:
-                  f.write(f"DATABASE_URL={new}\n")
-              print("[IPv4] patched DATABASE_URL with hostaddr")
-          else:
-              print("[IPv4] WARNING: no IPv4 A record; connection may fail on IPv6-only runner")
+          python - <<'PY'
+          import os, urllib.parse, socket
+          dsn=os.environ['DATABASE_URL']
+          u=urllib.parse.urlparse(dsn)
+          host=u.hostname; port=u.port or 5432
+          ip=socket.getaddrinfo(host, port, family=socket.AF_INET)[0][4][0]
+          q=urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+          q.append(('hostaddr', ip))
+          new_q=urllib.parse.urlencode(q)
+          new_dsn=urllib.parse.urlunparse((u.scheme, u.netloc, u.path, u.params, new_q, u.fragment))
+          open(os.environ['GITHUB_ENV'],'a').write(f"DATABASE_URL={new_dsn}\n")
           PY
 
-      - name: DB smoke test (prints server addr:port)
+      - name: DB smoke test
         run: |
           python - <<'PY'
           import os, psycopg2
-          dsn = os.environ['DATABASE_URL']
-          try:
-              with psycopg2.connect(dsn, connect_timeout=10) as conn:
-                  with conn.cursor() as cur:
-                      cur.execute("select inet_server_addr()::text, inet_server_port()")
-                      print("[DB]", cur.fetchone())
-          except Exception as e:
-              print("[DB] connect failed:", e); raise
+          c=psycopg2.connect(os.environ['DATABASE_URL'])
+          cur=c.cursor(); cur.execute('select 1'); cur.fetchone(); c.close()
           PY
 
-      - name: Run Dataupsert (Full backfill)
-        env:
-          CG_API_KEY: ${{ secrets.CG_API_KEY }}
-          DATABASE_URL: ${{ env.DATABASE_URL }}
+      - name: Run Dataupsert (Full sweep)
         run: python Dataupsert.py
