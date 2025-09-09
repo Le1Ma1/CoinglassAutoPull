@@ -20,7 +20,8 @@ jobs:
       CG_API_KEY: ${{ secrets.CG_API_KEY }}
       DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
       CG_QPM: '80'
-      START_DATE: '2015-01-01'  # 你原本就是全量
+      START_DATE: '2015-01-01'
+      PGCONNECT_TIMEOUT: '20'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,18 +38,31 @@ jobs:
       - name: Force IPv4 to Supabase
         env:
           DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        shell: bash
         run: |
-          set -euo pipefail
-          HOST=$(python - <<'PY'
-          import os, urllib.parse
-          u = urllib.parse.urlparse(os.environ['DB_URL'])
-          print(u.hostname or '')
+          python3 - <<'PY'
+          import os, urllib.parse, socket, sys
+          db_url = os.environ.get('DB_URL', '')
+          print(f"[IPv4] DB_URL length={len(db_url)}")
+          if not db_url:
+              print("[IPv4] ERROR: DB_URL not provided"); sys.exit(0)
+          u = urllib.parse.urlparse(db_url)
+          host = u.hostname or ''
+          print(f"[IPv4] host={host}")
+          if not host:
+              print("[IPv4] ERROR: cannot parse host from DB_URL"); sys.exit(0)
+          ipv4 = None
+          try:
+              for fam, stype, proto, cname, sockaddr in socket.getaddrinfo(host, None, socket.AF_INET):
+                  ipv4 = sockaddr[0]; break
+          except Exception as e:
+              print(f"[IPv4] getaddrinfo error: {e}")
+          if ipv4:
+              print(f"[IPv4] resolved IPv4={ipv4}")
+              with open(os.environ['GITHUB_ENV'],'a') as f:
+                  f.write(f"PGHOSTADDR={ipv4}\n")
+          else:
+              print("[IPv4] WARNING: no A record found; PGHOSTADDR not set (runner可能無法連線IPv6)")
           PY
-          )
-          IPV4=$(getent ahostsv4 "$HOST" | awk '{print $1; exit}')
-          [ -n "$IPV4" ] || { echo "Cannot resolve IPv4 for $HOST"; exit 1; }
-          echo "PGHOSTADDR=$IPV4" >> "$GITHUB_ENV"
 
       - name: Run Dataupsert (Full backfill)
         env:
