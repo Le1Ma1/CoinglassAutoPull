@@ -1,0 +1,46 @@
+name: Coinglass Fast T+0
+
+on:
+  schedule:
+    - cron: "10 0 * * *"    # 00:10 UTC
+  workflow_dispatch: {}
+
+permissions: { contents: read }
+
+concurrency:
+  group: coinglass-ingest
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Date window (2 days)
+        run: |
+          echo "START_DATE=$(date -u -d '2 days ago' +%F)" >> $GITHUB_ENV
+          echo "END_DATE=$(date -u -d 'yesterday' +%F)"   >> $GITHUB_ENV
+      - name: Ingest fast
+        env:
+          CG_API_KEY:      ${{ secrets.CG_API_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          CG_QPM: "80"
+          CG_API_LIMIT: "4500"
+          CG_EXCHANGES: "Binance"
+          CG_EXLISTS: "Binance,OKX,Bybit"
+          CG_COINS: "BTC,ETH,XRP,BNB,SOL,DOGE,ADA"
+          START_DATE: ${{ env.START_DATE }}
+          END_DATE:   ${{ env.END_DATE }}
+          CG_TASKS: "futures_candles_1d,spot_candles_1d,oi_agg_1d,funding_1d"
+        run: python Dataupsert.py

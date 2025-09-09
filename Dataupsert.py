@@ -739,29 +739,38 @@ def ingest_indices_daily(conn):
     upsert(conn, sql_pi, rows, t3)
 
 # -------- 入口 --------
+TASKS = [x.strip() for x in getenv_any(["CG_TASKS","TASKS"], "").split(",") if x.strip()]
+
 def run_all():
     must_env()
     log(f"啟動，限流 {min(QPM,80)} req/min，BASE={BASE}")
     conn = pg()
     db_ping(conn)
 
-    ingest_futures_candles_1d(conn)
-    ingest_spot_candles_1d(conn)
-    ingest_oi_agg_1d(conn)
-    ingest_oi_stable_1d(conn)
-    ingest_oi_coinm_1d(conn)
-    ingest_funding_1d(conn)
-    ingest_long_short_1d(conn)
-    ingest_liquidation_1d(conn)
-    ingest_orderbook_agg_futures_1d(conn)
-    ingest_taker_vol_futures_1d(conn)
-    ingest_etf_bitcoin_flow_and_aum(conn)
-    ingest_etf_premium_discount(conn, tickers=None)
-    ingest_hk_etf_flow(conn)
-    ingest_coinbase_premium_index_1d(conn)
-    ingest_bitfinex_margin_ls_1d(conn)  # 用 COINS 七幣
-    ingest_borrow_ir_1d(conn)
-    ingest_indices_daily(conn)
+    pipeline = [
+        ("futures_candles_1d",             lambda: ingest_futures_candles_1d(conn)),
+        ("spot_candles_1d",                lambda: ingest_spot_candles_1d(conn)),
+        ("oi_agg_1d",                      lambda: ingest_oi_agg_1d(conn)),
+        ("oi_stable_1d",                   lambda: ingest_oi_stable_1d(conn)),
+        ("oi_coinm_1d",                    lambda: ingest_oi_coinm_1d(conn)),
+        ("funding_1d",                     lambda: ingest_funding_1d(conn)),
+        ("long_short_1d",                  lambda: ingest_long_short_1d(conn)),
+        ("liquidation_1d",                 lambda: ingest_liquidation_1d(conn)),
+        ("orderbook_agg_futures_1d",       lambda: ingest_orderbook_agg_futures_1d(conn)),
+        ("taker_vol_agg_futures_1d",       lambda: ingest_taker_vol_futures_1d(conn)),
+        ("etf_bitcoin_flow_aum",           lambda: ingest_etf_bitcoin_flow_and_aum(conn)),
+        ("etf_premium_discount_1d",        lambda: ingest_etf_premium_discount(conn, tickers=None)),
+        ("hk_etf_flow_1d",                 lambda: ingest_hk_etf_flow(conn)),
+        ("coinbase_premium_index_1d",      lambda: ingest_coinbase_premium_index_1d(conn)),
+        ("bitfinex_margin_long_short_1d",  lambda: ingest_bitfinex_margin_ls_1d(conn)),  # 預設用 COINS
+        ("borrow_interest_rate_1d",        lambda: ingest_borrow_ir_1d(conn)),
+        ("indices_daily",                  lambda: ingest_indices_daily(conn)),
+    ]
+
+    for name, fn in pipeline:
+        if TASKS and name not in TASKS:
+            continue
+        fn()
 
     conn.close()
     log("完成")
