@@ -1,0 +1,59 @@
+services:
+  # 快速回補 00:01 UTC
+  - type: cron
+    name: coinglass-fast-0001
+    env: python
+    schedule: "1 0 * * *"            # 00:01 UTC 每日
+    pythonVersion: 3.11
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash scripts/run_fast.sh
+    envVars:
+      - key: COINGLASS_API_KEY       # ← 填在 Render（secret）
+        sync: false
+      - key: DATABASE_URL            # ← Supabase 的 postgres 連線字串（secret）
+        sync: false
+      # 下列可選：不填走預設
+      - key: FAST_DAYS
+        value: "4"
+      - key: CG_QPM
+        value: "60"
+      - key: CG_EXLISTS
+        value: "Binance,OKX,Bybit"
+      - key: CG_EXCHANGES
+        value: "Binance"
+      - key: CG_COINS
+        value: "BTC,ETH,XRP,BNB,SOL,DOGE,ADA"
+
+  # 快速回補 00:10 UTC（第二次再掃一輪，防資料稍晚到）
+  - type: cron
+    name: coinglass-fast-0010
+    env: python
+    schedule: "10 0 * * *"           # 00:10 UTC 每日
+    pythonVersion: 3.11
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash scripts/run_fast.sh
+    envVars:
+      - key: COINGLASS_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: FAST_DAYS
+        value: "4"
+      - key: CG_QPM
+        value: "60"
+
+  # 全量修補 02:20 UTC
+  - type: cron
+    name: coinglass-full-0220
+    env: python
+    schedule: "20 2 * * *"           # 02:20 UTC 每日
+    pythonVersion: 3.11
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash scripts/run_full.sh
+    envVars:
+      - key: COINGLASS_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: CG_QPM
+        value: "60"
