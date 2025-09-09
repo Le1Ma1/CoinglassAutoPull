@@ -5,14 +5,13 @@ services:
     env: python
     plan: starter
     region: singapore
-    pythonVersion: 3.11
     schedule: "1 0 * * *"
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     envVars:
       - key: COINGLASS_API_KEY
         sync: false
-      - key: DATABASE_URL        # 要含 sslmode=require
+      - key: DATABASE_URL           # 需含 sslmode=require
         sync: false
       - key: FAST_DAYS
         value: "4"
@@ -31,7 +30,6 @@ services:
     env: python
     plan: starter
     region: singapore
-    pythonVersion: 3.11
     schedule: "10 0 * * *"
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_fast.sh
@@ -51,7 +49,6 @@ services:
     env: python
     plan: starter
     region: singapore
-    pythonVersion: 3.11
     schedule: "20 2 * * *"
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_full.sh
