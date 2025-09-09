@@ -1,31 +1,54 @@
 name: Coinglass Fast T+0
+
 on:
   schedule:
-    - cron: '5 */2 * * *'   # 每 2 小時 UTC :05
-  workflow_dispatch: {}
+    - cron: '1 0 * * *'    # 00:01 UTC
+    - cron: '10 0 * * *'   # 00:10 UTC（保險再補一次）
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coinglass-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    env:
-      CG_API_KEY: ${{ secrets.CG_API_KEY }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      CG_QPM: '60'
-      CG_TIMEOUT: '90'
-      CG_API_LIMIT: '4500'
-      CG_EXCHANGES: 'Binance'
-      CG_EXLISTS: 'Binance,OKX,Bybit'
-      CG_COINS: 'BTC,ETH,XRP,BNB,SOL,DOGE,ADA'
-      # 只跑會影響日內觀察/指標的任務，縮短時長
-      TASKS: 'futures_candles_1d,spot_candles_1d,oi_agg_1d,oi_stable_1d,oi_coinm_1d,funding_1d,long_short_1d,liquidation_1d,orderbook_agg_futures_1d,taker_vol_agg_futures_1d,coinbase_premium_index_1d,bitfinex_margin_long_short_1d,borrow_interest_rate_1d'
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install -r requirements.txt
-      - name: 只抓近 4 天（含昨天），快補
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: 只抓近 4 天（含昨天）快補 & 保障 SSL 連線
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           echo "START_DATE=$(date -u -d '4 days ago' +%F)" >> $GITHUB_ENV
-          echo "END_DATE=$(date -u -d 'yesterday' +%F)"   >> $GITHUB_ENV
-      - run: python Dataupsert.py
+          echo "END_DATE=" >> $GITHUB_ENV
+          URL="$SUPABASE_DB_URL"
+          if [[ "$URL" != *"sslmode="* ]]; then
+            [[ "$URL" == *"?"* ]] && SEP="&" || SEP="?"
+            URL="${URL}${SEP}sslmode=require"
+          fi
+          echo "DATABASE_URL=$URL" >> $GITHUB_ENV
+          echo "SUPABASE_DB_URL=$URL" >> $GITHUB_ENV
+
+      - name: Run Dataupsert (Fast)
+        env:
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.CG_API_KEY }}
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          SUPABASE_DB_URL: ${{ env.SUPABASE_DB_URL }}
+          CG_QPM: '60'
+          CG_EXCHANGES: 'Binance'
+          CG_EXLISTS: 'Binance,OKX,Bybit'
+          CG_COINS: 'BTC,ETH,XRP,BNB,SOL,DOGE,ADA'
+        run: python Dataupsert.py

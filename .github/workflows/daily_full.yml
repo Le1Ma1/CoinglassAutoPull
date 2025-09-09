@@ -1,32 +1,53 @@
 name: Coinglass Full T+1
+
 on:
   schedule:
-    - cron: '35 0 * * *'   # 每天 00:35 UTC
-  workflow_dispatch: {}
+    - cron: '20 2 * * *'   # 02:20 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coinglass-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    concurrency:
-      group: coinglass-full
-      cancel-in-progress: false
-    env:
-      CG_API_KEY: ${{ secrets.CG_API_KEY }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      CG_QPM: '80'
-      CG_TIMEOUT: '120'
-      CG_API_LIMIT: '4500'
-      CG_EXCHANGES: 'Binance'
-      CG_EXLISTS: 'Binance,OKX,Bybit'
-      CG_COINS: 'BTC,ETH,XRP,BNB,SOL,DOGE,ADA'
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install -r requirements.txt
-      - name: 從歷史抓到昨天，做日更校正
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: 設定全量期間 & 保障 SSL 連線
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           echo "START_DATE=2015-01-01" >> $GITHUB_ENV
-          echo "END_DATE=$(date -u -d 'yesterday' +%F)" >> $GITHUB_ENV
-      - run: python Dataupsert.py
+          echo "END_DATE=" >> $GITHUB_ENV
+          URL="$SUPABASE_DB_URL"
+          if [[ "$URL" != *"sslmode="* ]]; then
+            [[ "$URL" == *"?"* ]] && SEP="&" || SEP="?"
+            URL="${URL}${SEP}sslmode=require"
+          fi
+          echo "DATABASE_URL=$URL" >> $GITHUB_ENV
+          echo "SUPABASE_DB_URL=$URL" >> $GITHUB_ENV
+
+      - name: Run Dataupsert (Full)
+        env:
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          COINGLASS_API_KEY: ${{ secrets.CG_API_KEY }}
+          DATABASE_URL: ${{ env.DATABASE_URL }}
+          SUPABASE_DB_URL: ${{ env.SUPABASE_DB_URL }}
+          CG_QPM: '80'
+          CG_EXCHANGES: 'Binance'
+          CG_EXLISTS: 'Binance,OKX,Bybit'
+          CG_COINS: 'BTC,ETH,XRP,BNB,SOL,DOGE,ADA'
+        run: python Dataupsert.py

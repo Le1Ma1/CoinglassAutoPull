@@ -13,6 +13,8 @@ from typing import Dict, Any, List, Tuple, Optional
 import requests
 import psycopg2
 from psycopg2.extras import execute_values
+import socket
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 # -------- .env --------
 try:
@@ -88,6 +90,29 @@ def must_env():
         raise SystemExit("缺少環境變數：COINGLASS_API_KEY/CG_API_KEY 或 SUPABASE_DB_URL/DATABASE_URL")
 
 # -------- 工具 --------
+# --- 新增工具函式：把 DB URL 加上 hostaddr=IPv4，並保留 host 作為 SNI ---
+def _dsn_force_ipv4(dsn: str) -> str:
+    try:
+        u = urlparse(dsn.replace("postgres://", "postgresql://"))
+        if u.scheme not in ("postgresql", "postgres"):
+            return dsn
+        host = u.hostname
+        port = u.port or 5432
+        if not host:
+            return dsn
+        # 解析第一個 IPv4
+        ipv4 = next((ai[4][0] for ai in socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)), None)
+        if not ipv4:
+            return dsn
+        q = dict(parse_qsl(u.query, keep_blank_values=True))
+        # 連線走 IPv4，SNI/證書仍用原 host
+        q.setdefault("hostaddr", ipv4)
+        q.setdefault("sslmode", "require")
+        new = u._replace(query=urlencode(q))
+        return urlunparse(new)
+    except Exception:
+        return dsn
+
 def to_utc_ts(x) -> Optional[dt.datetime]:
     if x is None: return None
     if isinstance(x, (int, float)):
@@ -291,8 +316,18 @@ def pull_range(path: str, base_params: Dict[str,Any], start_ms: int, end_ms: int
     return out
 
 # -------- DB --------
+# --- 修改 pg()：預設啟用 IPv4；失敗時再重試一次 ---
 def pg():
-    return psycopg2.connect(DB_URL)
+    dsn = DB_URL
+    if getenv_any(["DB_FORCE_IPV4"], "1") == "1":
+        dsn = _dsn_force_ipv4(dsn)
+    try:
+        return psycopg2.connect(dsn)
+    except psycopg2.OperationalError as e:
+        # 若仍遇到網路/解析問題再強制一次
+        if "Network is unreachable" in str(e) or "could not translate host name" in str(e):
+            return psycopg2.connect(_dsn_force_ipv4(DB_URL))
+        raise
 
 def upsert(conn, sql: str, rows: List[Tuple], table_label: str):
     if not rows:
