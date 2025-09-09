@@ -2,52 +2,56 @@ name: Coinglass Full T+1
 
 on:
   schedule:
-    - cron: '20 2 * * *'   # 02:20 UTC
+    - cron: '20 2 * * *'  # 02:20 UTC
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: coinglass-${{ github.ref }}
-  cancel-in-progress: false
+  group: coinglass-full
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 420
+    env:
+      CG_API_KEY: ${{ secrets.CG_API_KEY }}
+      DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+      CG_QPM: '80'
+      START_DATE: '2015-01-01'  # 你原本就是全量
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: 設定全量期間 & 保障 SSL 連線
+      - name: Force IPv4 to Supabase
         env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        shell: bash
         run: |
-          echo "START_DATE=2015-01-01" >> $GITHUB_ENV
-          echo "END_DATE=" >> $GITHUB_ENV
-          URL="$SUPABASE_DB_URL"
-          if [[ "$URL" != *"sslmode="* ]]; then
-            [[ "$URL" == *"?"* ]] && SEP="&" || SEP="?"
-            URL="${URL}${SEP}sslmode=require"
-          fi
-          echo "DATABASE_URL=$URL" >> $GITHUB_ENV
-          echo "SUPABASE_DB_URL=$URL" >> $GITHUB_ENV
+          set -euo pipefail
+          HOST=$(python - <<'PY'
+          import os, urllib.parse
+          u = urllib.parse.urlparse(os.environ['DB_URL'])
+          print(u.hostname or '')
+          PY
+          )
+          IPV4=$(getent ahostsv4 "$HOST" | awk '{print $1; exit}')
+          [ -n "$IPV4" ] || { echo "Cannot resolve IPv4 for $HOST"; exit 1; }
+          echo "PGHOSTADDR=$IPV4" >> "$GITHUB_ENV"
 
-      - name: Run Dataupsert (Full)
+      - name: Run Dataupsert (Full backfill)
         env:
           CG_API_KEY: ${{ secrets.CG_API_KEY }}
-          COINGLASS_API_KEY: ${{ secrets.CG_API_KEY }}
-          DATABASE_URL: ${{ env.DATABASE_URL }}
-          SUPABASE_DB_URL: ${{ env.SUPABASE_DB_URL }}
-          CG_QPM: '80'
-          CG_EXCHANGES: 'Binance'
-          CG_EXLISTS: 'Binance,OKX,Bybit'
-          CG_COINS: 'BTC,ETH,XRP,BNB,SOL,DOGE,ADA'
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: python Dataupsert.py
