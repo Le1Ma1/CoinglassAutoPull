@@ -1,253 +1,344 @@
-set search_path to public;
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
 
--- ===== K 線（日） =====
-create table if not exists futures_candles_1d (
-  exchange   text not null,
-  symbol     text not null,
-  ts_utc     timestamptz not null,
-  date_utc   date not null,
-  open numeric, high numeric, low numeric, close numeric, volume_usd numeric,
-  primary key (exchange, symbol, ts_utc)
+CREATE TABLE public.bitfinex_margin_long_short_1d (
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  long_qty numeric,
+  short_qty numeric,
+  CONSTRAINT bitfinex_margin_long_short_1d_pkey PRIMARY KEY (symbol, ts_utc)
 );
-create index if not exists ix_futures_candles_1d_date on futures_candles_1d(date_utc);
-create index if not exists ix_futures_candles_1d_ts   on futures_candles_1d(ts_utc);
-
-create table if not exists spot_candles_1d (
-  exchange   text not null,
-  symbol     text not null,
-  ts_utc     timestamptz not null,
-  date_utc   date not null,
-  open numeric, high numeric, low numeric, close numeric, volume_usd numeric,
-  primary key (exchange, symbol, ts_utc)
-);
-create index if not exists ix_spot_candles_1d_date on spot_candles_1d(date_utc);
-create index if not exists ix_spot_candles_1d_ts   on spot_candles_1d(ts_utc);
-
--- ===== OI（聚合、穩定幣、幣本位）=====
-create table if not exists futures_oi_agg_1d (
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  open numeric, high numeric, low numeric, close numeric,
-  unit text default 'usd',
-  primary key (symbol, ts_utc, unit)
-);
-create index if not exists ix_oiagg1d_date on futures_oi_agg_1d(date_utc);
-create index if not exists ix_oiagg1d_ts   on futures_oi_agg_1d(ts_utc);
-
-create table if not exists futures_oi_stablecoin_1d (
-  exchange_list text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  open numeric, high numeric, low numeric, close numeric,
-  primary key (exchange_list, symbol, ts_utc)
-);
-create index if not exists ix_oistable1d_date on futures_oi_stablecoin_1d(date_utc);
-create index if not exists ix_oistable1d_ts   on futures_oi_stablecoin_1d(ts_utc);
-
-create table if not exists futures_oi_coin_margin_1d (
-  exchange_list text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  open numeric, high numeric, low numeric, close numeric,
-  primary key (exchange_list, symbol, ts_utc)
-);
-create index if not exists ix_oicoinm1d_date on futures_oi_coin_margin_1d(date_utc);
-create index if not exists ix_oicoinm1d_ts   on futures_oi_coin_margin_1d(ts_utc);
-
--- ===== 資金費率（日）=====
-create table if not exists funding_oi_weight_1d (
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  open numeric, high numeric, low numeric, close numeric,
-  primary key (symbol, ts_utc)
-);
-create index if not exists ix_funding_oiw_date on funding_oi_weight_1d(date_utc);
-create index if not exists ix_funding_oiw_ts   on funding_oi_weight_1d(ts_utc);
-
-create table if not exists funding_vol_weight_1d (
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  open numeric, high numeric, low numeric, close numeric,
-  primary key (symbol, ts_utc)
-);
-create index if not exists ix_funding_volw_date on funding_vol_weight_1d(date_utc);
-create index if not exists ix_funding_volw_ts   on funding_vol_weight_1d(ts_utc);
-
--- ===== 多空比（日）=====
-create table if not exists long_short_global_1d (
-  exchange text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  long_percent numeric, short_percent numeric, long_short_ratio numeric,
-  primary key (exchange, symbol, ts_utc)
-);
-create index if not exists ix_lsg1d_date on long_short_global_1d(date_utc);
-create index if not exists ix_lsg1d_ts   on long_short_global_1d(ts_utc);
-
-create table if not exists long_short_top_accounts_1d (
-  exchange text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  long_percent numeric, short_percent numeric, long_short_ratio numeric,
-  primary key (exchange, symbol, ts_utc)
-);
-create index if not exists ix_lsta1d_date on long_short_top_accounts_1d(date_utc);
-create index if not exists ix_lsta1d_ts   on long_short_top_accounts_1d(ts_utc);
-
-create table if not exists long_short_top_positions_1d (
-  exchange text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  long_percent numeric, short_percent numeric, long_short_ratio numeric,
-  primary key (exchange, symbol, ts_utc)
-);
-create index if not exists ix_lstp1d_date on long_short_top_positions_1d(date_utc);
-create index if not exists ix_lstp1d_ts   on long_short_top_positions_1d(ts_utc);
-
--- ===== 爆倉、委買委賣、主動買賣（日）=====
-create table if not exists liquidation_agg_1d (
-  exchange_list text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  long_liq_usd numeric, short_liq_usd numeric,
-  primary key (exchange_list, symbol, ts_utc)
-);
-create index if not exists ix_liqagg1d_date on liquidation_agg_1d(date_utc);
-create index if not exists ix_liqagg1d_ts   on liquidation_agg_1d(ts_utc);
-
-drop table if exists orderbook_agg_futures_1d;
-create table orderbook_agg_futures_1d (
-  exchange_list text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  bids_usd numeric, bids_qty numeric, asks_usd numeric, asks_qty numeric,
-  range_pct numeric not null default 0,
-  primary key (exchange_list, symbol, ts_utc, range_pct)
-);
-create index if not exists ix_obagg1d_date on orderbook_agg_futures_1d(date_utc);
-create index if not exists ix_obagg1d_ts   on orderbook_agg_futures_1d(ts_utc);
-
-create table if not exists taker_vol_agg_futures_1d (
-  exchange_list text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
-  buy_vol_usd numeric, sell_vol_usd numeric,
-  primary key (exchange_list, symbol, ts_utc)
-);
-create index if not exists ix_takeragg1d_date on taker_vol_agg_futures_1d(date_utc);
-create index if not exists ix_takeragg1d_ts   on taker_vol_agg_futures_1d(ts_utc);
-
--- ===== ETF（日，原本就是 date_utc，保留）=====
-create table if not exists etf_bitcoin_flow_1d (
-  date_utc date primary key,
-  total_flow_usd numeric, price_usd numeric, details jsonb
-);
-create table if not exists etf_bitcoin_net_assets_1d (
-  date_utc date primary key,
-  net_assets_usd numeric, change_usd numeric, price_usd numeric
-);
-create table if not exists etf_premium_discount_1d (
-  date_utc date not null, ticker text not null,
-  nav_usd numeric, market_price_usd numeric, premium_discount numeric,
-  primary key (date_utc, ticker)
-);
-create table if not exists hk_etf_flow_1d (
-  date_utc date primary key,
-  total_flow_usd numeric, price_usd numeric, details jsonb
-);
-
--- ===== 外部指標（日）=====
-create table if not exists coinbase_premium_index_1d (
-  ts_utc timestamptz primary key,
-  date_utc date not null,
-  premium_usd numeric, premium_rate numeric
-);
-create index if not exists ix_cpi1d_date on coinbase_premium_index_1d(date_utc);
-
-create table if not exists bitfinex_margin_long_short_1d (
-  symbol text not null,
-  ts_utc timestamptz not null,
-  date_utc date not null,
-  long_qty numeric, short_qty numeric,
-  primary key (symbol, ts_utc)
-);
-create index if not exists ix_bfxls1d_date on bitfinex_margin_long_short_1d(date_utc);
-create index if not exists ix_bfxls1d_ts   on bitfinex_margin_long_short_1d(ts_utc);
-
-create table if not exists borrow_interest_rate_1d (
-  exchange text not null,
-  symbol   text not null,
-  ts_utc   timestamptz not null,
-  date_utc date not null,
+CREATE TABLE public.borrow_interest_rate_1d (
+  exchange text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
   interest_rate numeric,
-  primary key (exchange, symbol, ts_utc)
+  CONSTRAINT borrow_interest_rate_1d_pkey PRIMARY KEY (exchange, symbol, ts_utc)
 );
-create index if not exists ix_borrowir1d_date on borrow_interest_rate_1d(date_utc);
-create index if not exists ix_borrowir1d_ts   on borrow_interest_rate_1d(ts_utc);
-
-create table if not exists idx_puell_multiple_daily (
-  date_utc date primary key, price numeric, puell_multiple numeric
+CREATE TABLE public.coinbase_premium_index_1d (
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  premium_usd numeric,
+  premium_rate numeric,
+  CONSTRAINT coinbase_premium_index_1d_pkey PRIMARY KEY (ts_utc)
 );
-create table if not exists idx_stock_to_flow_daily (
-  date_utc date primary key, price numeric, next_halving int
+CREATE TABLE public.etf_bitcoin_flow_1d (
+  date_utc date NOT NULL,
+  total_flow_usd numeric,
+  price_usd numeric,
+  details jsonb,
+  CONSTRAINT etf_bitcoin_flow_1d_pkey PRIMARY KEY (date_utc)
 );
-create table if not exists idx_pi_cycle_daily (
-  date_utc date primary key, price numeric, ma_110 numeric, ma_350_x2 numeric
+CREATE TABLE public.etf_bitcoin_net_assets_1d (
+  date_utc date NOT NULL,
+  net_assets_usd numeric,
+  change_usd numeric,
+  price_usd numeric,
+  CONSTRAINT etf_bitcoin_net_assets_1d_pkey PRIMARY KEY (date_utc)
 );
-
--- ===== 通用觸發器：維護 date_utc = UTC( ts_utc )::date =====
-create or replace function public._set_date_utc()
-returns trigger
-language plpgsql
-as $$
-begin
-  if NEW.ts_utc is null then
-    NEW.date_utc := null;
-  else
-    NEW.date_utc := (NEW.ts_utc at time zone 'UTC')::date;
-  end if;
-  return NEW;
-end $$;
-
-do $$
-declare
-  t text;
-  ts_tables text[] := array[
-    'futures_candles_1d',
-    'spot_candles_1d',
-    'futures_oi_agg_1d',
-    'futures_oi_stablecoin_1d',
-    'futures_oi_coin_margin_1d',
-    'funding_oi_weight_1d',
-    'funding_vol_weight_1d',
-    'long_short_global_1d',
-    'long_short_top_accounts_1d',
-    'long_short_top_positions_1d',
-    'liquidation_agg_1d',
-    'orderbook_agg_futures_1d',
-    'taker_vol_agg_futures_1d',
-    'coinbase_premium_index_1d',
-    'bitfinex_margin_long_short_1d',
-    'borrow_interest_rate_1d'
-  ];
-begin
-  foreach t in array ts_tables loop
-    execute format('drop trigger if exists trg_set_date_utc on %I', t);
-    execute format(
-      'create trigger trg_set_date_utc
-         before insert or update of ts_utc on %I
-       for each row execute function public._set_date_utc()', t);
-  end loop;
-end
-$$ language plpgsql;
+CREATE TABLE public.etf_premium_discount_1d (
+  date_utc date NOT NULL,
+  ticker text NOT NULL,
+  nav_usd numeric,
+  market_price_usd numeric,
+  premium_discount numeric,
+  CONSTRAINT etf_premium_discount_1d_pkey PRIMARY KEY (date_utc, ticker)
+);
+CREATE TABLE public.features_1d (
+  asset text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  px_open double precision,
+  px_high double precision,
+  px_low double precision,
+  px_close double precision,
+  vol_usd double precision,
+  oi_agg_close double precision,
+  oi_stable_close double precision,
+  oi_coinm_close double precision,
+  funding_oiw_close double precision,
+  funding_volw_close double precision,
+  lsr_global double precision,
+  lsr_top_accts double precision,
+  lsr_top_pos double precision,
+  ob_bids_usd double precision,
+  ob_asks_usd double precision,
+  ob_bids_qty double precision,
+  ob_asks_qty double precision,
+  ob_imb double precision,
+  depth_ratio_q double precision,
+  taker_buy_usd double precision,
+  taker_sell_usd double precision,
+  taker_imb double precision,
+  liq_long_usd double precision,
+  liq_short_usd double precision,
+  liq_net double precision,
+  etf_flow_usd double precision,
+  etf_aum_usd double precision,
+  etf_premdisc double precision,
+  cpi_premium_rate double precision,
+  bfx_long_qty double precision,
+  bfx_short_qty double precision,
+  borrow_ir double precision,
+  puell double precision,
+  s2f_next_halving integer,
+  pi_ma110 double precision,
+  pi_ma350x2 double precision,
+  ret_1d double precision,
+  roc_3 double precision,
+  roc_5 double precision,
+  roc_10 double precision,
+  roc_20 double precision,
+  roc_60 double precision,
+  roc_120 double precision,
+  roc_252 double precision,
+  mom_3 double precision,
+  mom_5 double precision,
+  mom_10 double precision,
+  mom_20 double precision,
+  mom_60 double precision,
+  mom_120 double precision,
+  mom_252 double precision,
+  sma_10 double precision,
+  sma_20 double precision,
+  sma_60 double precision,
+  sma_120 double precision,
+  sma_252 double precision,
+  ema_12 double precision,
+  ema_26 double precision,
+  macd double precision,
+  macd_signal_9 double precision,
+  macd_hist double precision,
+  bb_mid_20 double precision,
+  bb_up_20 double precision,
+  bb_dn_20 double precision,
+  atr_14 double precision,
+  rv_20 double precision,
+  rv_60 double precision,
+  rv_120 double precision,
+  z_ret_20 double precision,
+  z_ret_60 double precision,
+  z_ret_120 double precision,
+  d_oi_1 double precision,
+  oi_roc_5 double precision,
+  oi_roc_20 double precision,
+  oi_roc_60 double precision,
+  oi_z_60 double precision,
+  d_funding_1 double precision,
+  funding_ma_20 double precision,
+  funding_ma_60 double precision,
+  funding_z_60 double precision,
+  lsr_ma20_global double precision,
+  lsr_z60_global double precision,
+  lsr_ma20_top_accts double precision,
+  lsr_z60_top_accts double precision,
+  lsr_ma20_top_pos double precision,
+  lsr_z60_top_pos double precision,
+  ob_imb_ma20 double precision,
+  ob_imb_z60 double precision,
+  depth_ratio_q_ma20 double precision,
+  depth_ratio_q_z60 double precision,
+  taker_imb_ma20 double precision,
+  taker_imb_z60 double precision,
+  taker_buy_ma20 double precision,
+  taker_sell_ma20 double precision,
+  taker_buy_z60 double precision,
+  taker_sell_z60 double precision,
+  liq_z60 double precision,
+  etf_flow_z60 double precision,
+  etf_aum_roc_5 double precision,
+  etf_aum_roc_20 double precision,
+  premdisc_ma20 double precision,
+  premdisc_z60 double precision,
+  cpi_ma20 double precision,
+  cpi_z60 double precision,
+  bfx_lr double precision,
+  bfx_lr_d1 double precision,
+  borrow_ir_ma20 double precision,
+  puell_d1 double precision,
+  s2f_d1 double precision,
+  pi_ma110_d1 double precision,
+  pi_ma350x2_d1 double precision,
+  xsec_ret_rank double precision,
+  xsec_mom_rank_20 double precision,
+  xsec_vol_rank_60 double precision,
+  rel_to_btc double precision,
+  feature_ver integer NOT NULL DEFAULT 1,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  ext_features jsonb NOT NULL DEFAULT '{}'::jsonb,
+  date_utc date DEFAULT ((ts_utc AT TIME ZONE 'UTC'::text))::date,
+  CONSTRAINT features_1d_pkey PRIMARY KEY (asset, ts_utc)
+);
+CREATE TABLE public.funding_oi_weight_1d (
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  CONSTRAINT funding_oi_weight_1d_pkey PRIMARY KEY (symbol, ts_utc)
+);
+CREATE TABLE public.funding_vol_weight_1d (
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  CONSTRAINT funding_vol_weight_1d_pkey PRIMARY KEY (symbol, ts_utc)
+);
+CREATE TABLE public.futures_candles_1d (
+  exchange text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  volume_usd numeric,
+  CONSTRAINT futures_candles_1d_pkey PRIMARY KEY (exchange, symbol, ts_utc)
+);
+CREATE TABLE public.futures_oi_agg_1d (
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  unit text NOT NULL DEFAULT 'usd'::text,
+  CONSTRAINT futures_oi_agg_1d_pkey PRIMARY KEY (symbol, ts_utc, unit)
+);
+CREATE TABLE public.futures_oi_coin_margin_1d (
+  exchange_list text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  CONSTRAINT futures_oi_coin_margin_1d_pkey PRIMARY KEY (exchange_list, symbol, ts_utc)
+);
+CREATE TABLE public.futures_oi_stablecoin_1d (
+  exchange_list text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  CONSTRAINT futures_oi_stablecoin_1d_pkey PRIMARY KEY (exchange_list, symbol, ts_utc)
+);
+CREATE TABLE public.hk_etf_flow_1d (
+  date_utc date NOT NULL,
+  total_flow_usd numeric,
+  price_usd numeric,
+  details jsonb,
+  CONSTRAINT hk_etf_flow_1d_pkey PRIMARY KEY (date_utc)
+);
+CREATE TABLE public.idx_pi_cycle_daily (
+  date_utc date NOT NULL,
+  price numeric,
+  ma_110 numeric,
+  ma_350_x2 numeric,
+  CONSTRAINT idx_pi_cycle_daily_pkey PRIMARY KEY (date_utc)
+);
+CREATE TABLE public.idx_puell_multiple_daily (
+  date_utc date NOT NULL,
+  price numeric,
+  puell_multiple numeric,
+  CONSTRAINT idx_puell_multiple_daily_pkey PRIMARY KEY (date_utc)
+);
+CREATE TABLE public.idx_stock_to_flow_daily (
+  date_utc date NOT NULL,
+  price numeric,
+  next_halving integer,
+  CONSTRAINT idx_stock_to_flow_daily_pkey PRIMARY KEY (date_utc)
+);
+CREATE TABLE public.labels_1d (
+  asset text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  y_ret_d1 double precision,
+  y_dir_d1 smallint,
+  y_vol_d1 smallint,
+  date_utc date DEFAULT ((ts_utc AT TIME ZONE 'UTC'::text))::date,
+  CONSTRAINT labels_1d_pkey PRIMARY KEY (asset, ts_utc)
+);
+CREATE TABLE public.liquidation_agg_1d (
+  exchange_list text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  long_liq_usd numeric,
+  short_liq_usd numeric,
+  CONSTRAINT liquidation_agg_1d_pkey PRIMARY KEY (exchange_list, symbol, ts_utc)
+);
+CREATE TABLE public.long_short_global_1d (
+  exchange text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  long_percent numeric,
+  short_percent numeric,
+  long_short_ratio numeric,
+  CONSTRAINT long_short_global_1d_pkey PRIMARY KEY (exchange, symbol, ts_utc)
+);
+CREATE TABLE public.long_short_top_accounts_1d (
+  exchange text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  long_percent numeric,
+  short_percent numeric,
+  long_short_ratio numeric,
+  CONSTRAINT long_short_top_accounts_1d_pkey PRIMARY KEY (exchange, symbol, ts_utc)
+);
+CREATE TABLE public.long_short_top_positions_1d (
+  exchange text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  long_percent numeric,
+  short_percent numeric,
+  long_short_ratio numeric,
+  CONSTRAINT long_short_top_positions_1d_pkey PRIMARY KEY (exchange, symbol, ts_utc)
+);
+CREATE TABLE public.orderbook_agg_futures_1d (
+  exchange_list text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  bids_usd numeric,
+  bids_qty numeric,
+  asks_usd numeric,
+  asks_qty numeric,
+  range_pct numeric NOT NULL DEFAULT 0,
+  CONSTRAINT orderbook_agg_futures_1d_pkey PRIMARY KEY (exchange_list, symbol, ts_utc, range_pct)
+);
+CREATE TABLE public.spot_candles_1d (
+  exchange text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  open numeric,
+  high numeric,
+  low numeric,
+  close numeric,
+  volume_usd numeric,
+  CONSTRAINT spot_candles_1d_pkey PRIMARY KEY (exchange, symbol, ts_utc)
+);
+CREATE TABLE public.taker_vol_agg_futures_1d (
+  exchange_list text NOT NULL,
+  symbol text NOT NULL,
+  ts_utc timestamp with time zone NOT NULL,
+  date_utc date NOT NULL,
+  buy_vol_usd numeric,
+  sell_vol_usd numeric,
+  CONSTRAINT taker_vol_agg_futures_1d_pkey PRIMARY KEY (exchange_list, symbol, ts_utc)
+);
