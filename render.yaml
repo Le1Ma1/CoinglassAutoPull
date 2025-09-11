@@ -69,4 +69,4 @@ services:
     startCommand: bash scripts/run_fast.sh
     envVars:
       - key: PYTHON_VERSION   # 🔑 用環境變數來指定 Python 版本
-        value: "3.11"
+        value: "3.11.9"
