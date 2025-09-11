@@ -9,9 +9,11 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: COINGLASS_API_KEY
         sync: false
-      - key: DATABASE_URL           # 需含 sslmode=require
+      - key: DATABASE_URL
         sync: false
       - key: FAST_DAYS
         value: "4"
@@ -34,6 +36,8 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: COINGLASS_API_KEY
         sync: false
       - key: DATABASE_URL
@@ -53,6 +57,8 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_full.sh
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: COINGLASS_API_KEY
         sync: false
       - key: DATABASE_URL
@@ -60,7 +66,7 @@ services:
       - key: CG_QPM
         value: "60"
 
-  # 背景 worker，固定 Python 版本
+  # 背景 worker
   - type: worker
     name: coinglass-cron
     env: python
@@ -68,5 +74,5 @@ services:
     buildCommand: pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     envVars:
-      - key: PYTHON_VERSION   # 🔑 用環境變數來指定 Python 版本
+      - key: PYTHON_VERSION
         value: "3.11.9"
