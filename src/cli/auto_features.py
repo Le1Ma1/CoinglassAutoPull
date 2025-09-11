@@ -1,9 +1,9 @@
 import os
 from dotenv import load_dotenv
-from datetime import date
+from datetime import date, timedelta
 
 from src.cli.build_and_upload_features_1d import main as build_all
-from src.common.db import connect   # ✅ 改用共用連線
+from src.common.db import connect   # ✅ 共用連線
 
 load_dotenv()
 
@@ -52,20 +52,26 @@ def check_completeness(conn, d: date) -> bool:
                 return False
     return True
 
+def find_latest_complete_date(conn, lookback=7):
+    """往前檢查最近 N 天，找出最後一個完整的日期"""
+    latest = latest_date(conn)
+    if not latest:
+        return None
+    for i in range(lookback):
+        d = latest - timedelta(days=i)
+        if check_completeness(conn, d):
+            return d
+    return None
+
 def main():
-    conn = connect()   # ✅ 改用共用連線
-    d = latest_date(conn)
+    conn = connect()
+    d = find_latest_complete_date(conn, lookback=7)
     if not d:
-        log("來源沒有任何資料")
+        log("最近 7 天都不完整 → 跳過")
         return
 
-    log(f"最新日期 {d}")
-    if check_completeness(conn, d):
-        log(f"{d} 完整 → 開始加工")
-        build_all()
-    else:
-        log(f"{d} 不完整 → 跳過")
-
+    log(f"找到完整日期 {d} → 開始加工")
+    build_all()
     conn.close()
 
 if __name__ == "__main__":

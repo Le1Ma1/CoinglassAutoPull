@@ -9,13 +9,9 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     envVars:
-      - key: PGOPTIONS
-        value: "-c inet_client_only=ipv4"
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-      - key: COINGLASS_API_KEY
+      - key: SUPABASE_DB_URL
         sync: false
-      - key: DATABASE_URL
+      - key: COINGLASS_API_KEY
         sync: false
       - key: FAST_DAYS
         value: "4"
@@ -27,6 +23,8 @@ services:
         value: "Binance"
       - key: CG_COINS
         value: "BTC,ETH,XRP,BNB,SOL,DOGE,ADA"
+      - key: PYTHON_VERSION
+        value: "3.11.9"
 
   # 快速回補 00:10 UTC
   - type: cron
@@ -38,18 +36,16 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     envVars:
-      - key: PGOPTIONS
-        value: "-c inet_client_only=ipv4"
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-      - key: COINGLASS_API_KEY
+      - key: SUPABASE_DB_URL
         sync: false
-      - key: DATABASE_URL
+      - key: COINGLASS_API_KEY
         sync: false
       - key: FAST_DAYS
         value: "4"
       - key: CG_QPM
         value: "60"
+      - key: PYTHON_VERSION
+        value: "3.11.9"
 
   # 全量修補 02:20 UTC
   - type: cron
@@ -61,16 +57,14 @@ services:
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: bash scripts/run_full.sh
     envVars:
-      - key: PGOPTIONS
-        value: "-c inet_client_only=ipv4"
-      - key: PYTHON_VERSION
-        value: "3.11.9"
-      - key: COINGLASS_API_KEY
+      - key: SUPABASE_DB_URL
         sync: false
-      - key: DATABASE_URL
+      - key: COINGLASS_API_KEY
         sync: false
       - key: CG_QPM
         value: "60"
+      - key: PYTHON_VERSION
+        value: "3.11.9"
 
   # 背景 worker
   - type: worker
@@ -80,38 +74,37 @@ services:
     buildCommand: pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     envVars:
-      - key: PGOPTIONS
-        value: "-c inet_client_only=ipv4"
+      - key: SUPABASE_DB_URL
+        sync: false
       - key: PYTHON_VERSION
         value: "3.11.9"
 
-  # 每小時嘗試增量
+  # 每小時檢查特徵
   - type: cron
     name: features-hourly
     env: python
     plan: starter
+    region: singapore
     schedule: "0 * * * *"
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python -m src.cli.auto_features
     envVars:
       - key: SUPABASE_DB_URL
         sync: false
-      - key: DATABASE_URL
-        sync: false
       - key: PYTHON_VERSION
         value: "3.11.9"
 
+  # 保底全量特徵 02:30 UTC
   - type: cron
     name: features-batch-0230
     env: python
     plan: starter
+    region: singapore
     schedule: "30 2 * * *"
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python -m src.cli.build_and_upload_features_1d
     envVars:
       - key: SUPABASE_DB_URL
-        sync: false
-      - key: DATABASE_URL
         sync: false
       - key: PYTHON_VERSION
         value: "3.11.9"
