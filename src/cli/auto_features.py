@@ -1,9 +1,9 @@
 import os
-import psycopg2
 from dotenv import load_dotenv
 from datetime import date
 
 from src.cli.build_and_upload_features_1d import main as build_all
+from src.common.db import connect   # ✅ 改用共用連線
 
 load_dotenv()
 
@@ -53,8 +53,7 @@ def check_completeness(conn, d: date) -> bool:
     return True
 
 def main():
-    dsn = os.environ["SUPABASE_DB_URL"]
-    conn = psycopg2.connect(dsn)
+    conn = connect()   # ✅ 改用共用連線
     d = latest_date(conn)
     if not d:
         log("來源沒有任何資料")

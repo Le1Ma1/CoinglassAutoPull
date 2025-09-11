@@ -1,11 +1,18 @@
+# src/common/db.py
 import os, psycopg2, urllib.parse
 from dotenv import load_dotenv
 load_dotenv()
 
 def connect():
-    # 優先使用分欄參數，避免殘留 PG_DSN 造成誤連
-    host = os.getenv("PGHOST")
     sslmode = os.getenv("PGSSLMODE", "require")
+
+    # 1. 優先使用 SUPABASE_DB_URL / DATABASE_URL
+    dsn = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
+    if dsn:
+        return psycopg2.connect(dsn, sslmode=sslmode)
+
+    # 2. 傳統 PGHOST / PGUSER / PGPASSWORD
+    host = os.getenv("PGHOST")
     if host:
         return psycopg2.connect(
             host=host,
@@ -15,6 +22,8 @@ def connect():
             password=os.getenv("PGPASSWORD", ""),
             sslmode=sslmode
         )
+
+    # 3. PG_DSN fallback
     dsn = os.getenv("PG_DSN", "").strip()
     if dsn:
         u = urllib.parse.urlparse(dsn)
@@ -25,4 +34,5 @@ def connect():
             password=urllib.parse.unquote(u.password or ""),
             sslmode=sslmode
         )
+
     raise RuntimeError("No Postgres connection info found.")
