@@ -6,12 +6,13 @@ load_dotenv()
 def connect():
     sslmode = os.getenv("PGSSLMODE", "require")
 
-    # 1. 優先使用 SUPABASE_DB_URL / DATABASE_URL
-    dsn = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
-    if dsn:
-        return psycopg2.connect(dsn, sslmode=sslmode)
+    # 1. 最優先：SUPABASE_DB_URL / DATABASE_URL / POSTGRES_URL
+    for key in ["SUPABASE_DB_URL", "DATABASE_URL", "POSTGRES_URL"]:
+        dsn = os.getenv(key)
+        if dsn:
+            return psycopg2.connect(dsn, sslmode=sslmode)
 
-    # 2. 傳統 PGHOST / PGUSER / PGPASSWORD
+    # 2. PGHOST / PGUSER / PGPASSWORD
     host = os.getenv("PGHOST")
     if host:
         return psycopg2.connect(
@@ -23,7 +24,7 @@ def connect():
             sslmode=sslmode
         )
 
-    # 3. PG_DSN fallback
+    # 3. PG_DSN
     dsn = os.getenv("PG_DSN", "").strip()
     if dsn:
         u = urllib.parse.urlparse(dsn)
