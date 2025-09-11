@@ -59,3 +59,13 @@ services:
         sync: false
       - key: CG_QPM
         value: "60"
+
+services:
+  - type: worker
+    name: coinglass-cron
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash scripts/run_fast.sh
+    plan: starter
+    environment:
+      pythonVersion: 3.11   # <== 新增這行，鎖定到 3.11
