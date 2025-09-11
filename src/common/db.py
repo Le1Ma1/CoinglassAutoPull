@@ -7,7 +7,7 @@ def connect():
     sslmode = os.getenv("PGSSLMODE", "require")
 
     # 1. 最優先：SUPABASE_DB_URL / DATABASE_URL / POSTGRES_URL
-    for key in ["SUPABASE_DB_URL", "DATABASE_URL", "POSTGRES_URL"]:
+    for key in ["SUPABASE_DB_URL", "DATABASE_URL", "POSTGRES_URL", "PG_DSN"]:
         dsn = os.getenv(key)
         if dsn:
             return psycopg2.connect(dsn, sslmode=sslmode)
