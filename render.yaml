@@ -60,7 +60,7 @@ services:
       - key: CG_QPM
         value: "60"
 
-services:
+  # 背景 worker，固定 Python 版本
   - type: worker
     name: coinglass-cron
     env: python
