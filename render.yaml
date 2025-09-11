@@ -64,8 +64,8 @@ services:
   - type: worker
     name: coinglass-cron
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
     startCommand: bash scripts/run_fast.sh
     plan: starter
     environment:
-      pythonVersion: 3.11   # <== 新增這行，鎖定到 3.11
+      pythonVersion: 3.11   # 🔑 鎖定 Python 3.11，避免跑到 3.13
