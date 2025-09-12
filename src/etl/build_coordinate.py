@@ -81,13 +81,14 @@ def _merge_on_index(df: pd.DataFrame, other: pd.DataFrame, cols: list[str]) -> p
 
 # 新增在檔內 _merge_on_index 旁
 def _merge_on_base(df: pd.DataFrame, other: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    """以『基礎資產』(去掉報價幣/分隔符，XBT->BTC) + ts_utc 左合併，並把來源值廣播到同基礎資產的所有交易對。"""
     import numpy as np
     if other is None or len(other) == 0:
         for c in cols:
             if c not in df.columns:
                 df[c] = np.nan
         return df
+
+    print(f"[merge_on_base] before join: df={len(df)}, other={len(other)}, cols={cols}", flush=True)
 
     other = _ensure_asset_ts(other).copy()
     for c in cols:
@@ -100,6 +101,7 @@ def _merge_on_base(df: pd.DataFrame, other: pd.DataFrame, cols: list[str]) -> pd
     tmp["asset_base"] = tmp["asset"].map(_asset_from_symbol)
 
     out = tmp.merge(other, on=["asset_base", "ts_utc"], how="left").drop(columns=["asset_base"])
+    print(f"[merge_on_base] after join: out={len(out)}, added_cols={[c for c in cols if c in out.columns]}", flush=True)
     return out.set_index(["asset","ts_utc"]).sort_index()
 
 def build_price_coordinate(fut: pd.DataFrame | None, spot: pd.DataFrame | None) -> pd.DataFrame:
@@ -159,11 +161,12 @@ def build_price_coordinate(fut: pd.DataFrame | None, spot: pd.DataFrame | None) 
     return px
 
 def left_join_all(px: pd.DataFrame, S: dict) -> pd.DataFrame:
-    """按骨幹座標把所有來源左連進來。"""
     df = px.copy()
+    print(f"[left_join_all] start rows={len(df)}, cols={list(df.columns)}", flush=True)
 
-    # OI
+    # 下面的 join 全部保留，加 debug print
     if S.get("oi") is not None:
+        print("[left_join_all] merge OI", flush=True)
         oi = _ensure_asset_ts(S["oi"]).rename(columns={
             "oi_total_close": "oi_agg_close",
             "oi_stable_close": "oi_stable_close",
@@ -171,10 +174,12 @@ def left_join_all(px: pd.DataFrame, S: dict) -> pd.DataFrame:
         })
         df = _merge_on_base(df, oi, ["oi_agg_close", "oi_stable_close", "oi_coinm_close"])
 
-    # funding
     if S.get("funding_oiw") is not None:
+        print("[left_join_all] merge funding_oiw", flush=True)
         df = _merge_on_base(df, _ensure_asset_ts(S["funding_oiw"]).rename(columns={"funding_close":"funding_oiw_close"}), ["funding_oiw_close"])
+
     if S.get("funding_volw") is not None:
+        print("[left_join_all] merge funding_volw", flush=True)
         df = _merge_on_base(df, _ensure_asset_ts(S["funding_volw"]).rename(columns={"funding_close":"funding_volw_close"}), ["funding_volw_close"])
 
     # long/short

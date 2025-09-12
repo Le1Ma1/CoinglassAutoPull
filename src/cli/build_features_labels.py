@@ -25,14 +25,17 @@ def main(days=7):
 
     log(f"抓取來源 {start} ~ {end}")
     S = load_sources_db(start, end)
+    for k,v in S.items():
+        if v is not None:
+            log(f"來源 {k}: rows={len(v)}, cols={list(v.columns)}")
 
     log("建立價格座標…")
     px = build_price_coordinate(S.get("fut"), S.get("spot"))
-    log(f"座標 rows={len(px)}")
+    log(f"座標 rows={len(px)}, cols={list(px.columns)}")
 
     log("左連接來源…")
     df = left_join_all(px, S)
-    log(f"左連完成 rows={len(df)}")
+    log(f"左連完成 rows={len(df)}, cols={list(df.columns)}")
 
     log("計算特徵…")
     feat = compute_features(df).reset_index()

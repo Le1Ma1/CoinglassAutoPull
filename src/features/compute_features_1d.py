@@ -23,6 +23,7 @@ def _imb(a, b):
     return out
 
 def compute_features(df):
+    print(f"[compute_features] input rows={len(df)}, cols={list(df.columns)}", flush=True)
     def per_asset(g):
         g = g.sort_index()
 
