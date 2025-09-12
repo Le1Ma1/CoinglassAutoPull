@@ -5,7 +5,7 @@ from dotenv import load_dotenv; load_dotenv()
 from src.etl.load_sources_db import load_sources_db
 from src.etl.build_coordinate import build_price_coordinate, left_join_all
 from src.features.compute_features_1d import compute_features
-from src.upload.copy_upsert import copy_upsert_labels
+from src.upload.copy_upsert import copy_upsert_labels, copy_upsert_chunks
 
 def log(msg): print(f"[run] {msg}", flush=True)
 
