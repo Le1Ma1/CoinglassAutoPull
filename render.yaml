@@ -79,14 +79,47 @@ services:
       - key: PYTHON_VERSION
         value: "3.11.9"
 
-  - name: features_labels_3d_A
-    schedule: "5 0 * * *"   # 00:05 UTC
-    command: "DAYS=3 python -m src.cli.build_features_labels"
+  # 特徵+標籤 00:05 UTC
+  - type: cron
+    name: features_labels_3d_A
+    env: python
+    plan: starter
+    region: singapore
+    schedule: "5 0 * * *"
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: DAYS=3 python -m src.cli.build_features_labels
+    envVars:
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.9"
 
-  - name: features_labels_3d_B
-    schedule: "15 0 * * *"  # 00:15 UTC
-    command: "DAYS=3 python -m src.cli.build_features_labels"
+  # 特徵+標籤 00:15 UTC
+  - type: cron
+    name: features_labels_3d_B
+    env: python
+    plan: starter
+    region: singapore
+    schedule: "15 0 * * *"
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: DAYS=3 python -m src.cli.build_features_labels
+    envVars:
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.9"
 
-  - name: features_labels_7d
-    schedule: "40 2 * * *"  # 02:40 UTC
-    command: "DAYS=7 python -m src.cli.build_features_labels"
+  # 特徵+標籤 02:40 UTC
+  - type: cron
+    name: features_labels_7d
+    env: python
+    plan: starter
+    region: singapore
+    schedule: "40 2 * * *"
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: DAYS=7 python -m src.cli.build_features_labels
+    envVars:
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.9"
