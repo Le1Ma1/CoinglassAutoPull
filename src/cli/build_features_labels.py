@@ -15,7 +15,9 @@ def compute_labels(df: pd.DataFrame) -> pd.DataFrame:
     out = out.sort_values(["asset","ts_utc"])
     out["y_ret_d1"] = out.groupby("asset")["px_close"].pct_change().shift(-1)
     out["y_dir_d1"] = (out["y_ret_d1"] > 0).astype("Int16")
-    out["y_vol_d1"] = (out.groupby("asset")["y_ret_d1"].transform(lambda x: x.abs().rolling(20,min_periods=5).std()) > 0.02).astype("Int16")
+    out["y_vol_d1"] = (out.groupby("asset")["y_ret_d1"].transform(
+        lambda x: x.abs().rolling(20,min_periods=5).std()
+    ) > 0.02).astype("Int16")
     return out.drop(columns=["px_close"])
 
 def main(days=7):
@@ -23,8 +25,11 @@ def main(days=7):
     end = date.today() - timedelta(days=1)
     start = end - timedelta(days=days-1)
 
-    log(f"抓取來源 {start} ~ {end}")
-    S = load_sources_db(start, end)
+    HISTORY_DAYS = 365  # 額外往前抓一年的資料
+    start_hist = start - timedelta(days=HISTORY_DAYS)
+
+    log(f"抓取來源 {start_hist} ~ {end}")
+    S = load_sources_db(start_hist, end)
     for k,v in S.items():
         if v is not None:
             log(f"來源 {k}: rows={len(v)}, cols={list(v.columns)}")
@@ -38,7 +43,7 @@ def main(days=7):
     log(f"左連完成 rows={len(df)}, cols={list(df.columns)}")
 
     log("計算特徵…")
-    feat = compute_features(df).reset_index()
+    feat = compute_features(df, start_date=start).reset_index()
     log(f"特徵完成 rows={len(feat)}, cols={len(feat.columns)}")
 
     log("上傳 features_1d…")
