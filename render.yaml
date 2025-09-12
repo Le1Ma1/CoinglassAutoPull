@@ -79,32 +79,14 @@ services:
       - key: PYTHON_VERSION
         value: "3.11.9"
 
-  # 每小時檢查特徵
-  - type: cron
-    name: features-hourly
-    env: python
-    plan: starter
-    region: singapore
-    schedule: "0 * * * *"
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: python -m src.cli.auto_features
-    envVars:
-      - key: SUPABASE_DB_URL
-        sync: false
-      - key: PYTHON_VERSION
-        value: "3.11.9"
+  - name: features_labels_3d_A
+    schedule: "5 0 * * *"   # 00:05 UTC
+    command: "DAYS=3 python -m src.cli.build_features_labels"
 
-  # 保底全量特徵 02:30 UTC
-  - type: cron
-    name: features-batch-0230
-    env: python
-    plan: starter
-    region: singapore
-    schedule: "30 2 * * *"
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: python -m src.cli.build_and_upload_features_1d
-    envVars:
-      - key: SUPABASE_DB_URL
-        sync: false
-      - key: PYTHON_VERSION
-        value: "3.11.9"
+  - name: features_labels_3d_B
+    schedule: "15 0 * * *"  # 00:15 UTC
+    command: "DAYS=3 python -m src.cli.build_features_labels"
+
+  - name: features_labels_7d
+    schedule: "40 2 * * *"  # 02:40 UTC
+    command: "DAYS=7 python -m src.cli.build_features_labels"
