@@ -112,9 +112,18 @@ def build_price_coordinate(fut: pd.DataFrame | None, spot: pd.DataFrame | None) 
         if tcol is None:
             continue
         tmp = d.copy()
+
+        # 統一 asset 命名規則 → 必定輸出 XXXUSDT
         if "asset" not in tmp.columns:
             sym = _pick_col(tmp.columns, "symbol")
-            tmp["asset"] = tmp[sym].map(_asset_from_symbol) if sym else "BTC"
+            if sym:
+                tmp["asset"] = tmp[sym].map(_asset_from_symbol)  # e.g. BTC, ETH
+            else:
+                tmp["asset"] = "BTC"
+        tmp["asset"] = tmp["asset"].astype(str).str.upper()
+        # 統一保證帶 USDT
+        tmp["asset"] = tmp["asset"].apply(lambda x: x if x.endswith("USDT") else x + "USDT")
+
         # 正規化時間
         if tcol.lower() == "date_utc":
             tmp["ts_utc"] = pd.to_datetime(tmp[tcol]).dt.tz_localize("UTC")
@@ -138,12 +147,15 @@ def build_price_coordinate(fut: pd.DataFrame | None, spot: pd.DataFrame | None) 
         raise RuntimeError("no price inputs")
     px = pd.concat(frames, ignore_index=True)
     px = px.sort_values(["asset", "ts_utc"]).drop_duplicates(["asset", "ts_utc"], keep="last")
-
-    px["asset"] = px["asset"].astype(str) + "USDT"
-
     # 設定索引，僅保留座標與最少欄位，後續左連其他來源
     px = px.set_index(["asset", "ts_utc"]).sort_index()
-    px = px.rename(columns={"open":"px_open","high":"px_high","low":"px_low","close":"px_close","volume_usd":"vol_usd"})
+    px = px.rename(columns={
+        "open": "px_open",
+        "high": "px_high",
+        "low": "px_low",
+        "close": "px_close",
+        "volume_usd": "vol_usd"
+    })
     return px
 
 def left_join_all(px: pd.DataFrame, S: dict) -> pd.DataFrame:
