@@ -5,7 +5,7 @@ from dotenv import load_dotenv; load_dotenv()
 from src.etl.load_sources_db import load_sources_db
 from src.etl.build_coordinate import build_price_coordinate, left_join_all
 from src.features.compute_features_1d import compute_features
-from src.upload.copy_upsert import copy_upsert_labels, copy_upsert_chunks
+from src.upload.copy_upsert import copy_upsert_chunks
 
 def log(msg): print(f"[run] {msg}", flush=True)
 
@@ -46,7 +46,7 @@ def main(days=7):
     log(f"標籤完成 rows={len(labels)}")
 
     log("上傳 labels_1d…")
-    copy_upsert_labels(labels, table="public.labels_1d")
+    copy_upsert_chunks(labels, table="public.labels_1d")
 
     log(f"全部完成。耗時 {time.perf_counter()-t0:.1f}s")
 
