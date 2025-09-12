@@ -46,7 +46,7 @@ def main(days=7):
     log(f"標籤完成 rows={len(labels)}")
 
     log("上傳 labels_1d…")
-    copy_upsert_chunks(labels, table="public.labels_1d")
+    copy_upsert_labels(labels, table="public.labels_1d")
 
     log(f"全部完成。耗時 {time.perf_counter()-t0:.1f}s")
 

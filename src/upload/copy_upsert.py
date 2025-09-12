@@ -47,3 +47,39 @@ def copy_upsert_chunks(df: pd.DataFrame, table="public.features_1d", chunk_rows=
             set {set_clause}, updated_at=now();
         """)
         conn.commit()
+
+def copy_upsert_labels(df: pd.DataFrame, table="public.labels_1d", chunk_rows=100_000, prefix=""):
+    df = df.copy()
+    exclude = {"created_at", "updated_at"}
+    cols = [c for c in df.columns if c not in exclude]
+    set_clause = ", ".join([f"{c}=excluded.{c}" for c in cols if c not in ("asset", "ts_utc", "date_utc")])
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("drop table if exists _stage_labels_1d;")
+        cur.execute("""
+            create temp table _stage_labels_1d
+            (like public.labels_1d including all)
+            on commit drop;
+        """)
+
+        n = len(df)
+        chunks = max(1, math.ceil(n / chunk_rows))
+        for i in range(chunks):
+            g = df.iloc[i * chunk_rows:(i + 1) * chunk_rows]
+            buf = io.StringIO()
+            g.to_csv(buf, index=False, na_rep="")
+            buf.seek(0)
+            cur.copy_expert(
+                f"copy _stage_labels_1d ({', '.join(cols)}) from stdin with (format csv, header true, null '')",
+                buf
+            )
+            pct = int((i + 1) * 100 / chunks)
+            print(f"[upload-labels]{prefix} chunk {i+1}/{chunks} rows={len(g)} ({pct}%)")
+
+        cur.execute(f"""
+            insert into {table} ({', '.join(cols)})
+            select {', '.join(cols)} from _stage_labels_1d
+            on conflict (asset, ts_utc) do update
+            set {set_clause}, updated_at=now();
+        """)
+        conn.commit()
