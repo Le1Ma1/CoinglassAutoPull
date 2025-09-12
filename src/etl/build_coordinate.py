@@ -138,6 +138,9 @@ def build_price_coordinate(fut: pd.DataFrame | None, spot: pd.DataFrame | None) 
         raise RuntimeError("no price inputs")
     px = pd.concat(frames, ignore_index=True)
     px = px.sort_values(["asset", "ts_utc"]).drop_duplicates(["asset", "ts_utc"], keep="last")
+
+    px["asset"] = px["asset"].astype(str) + "USDT"
+
     # 設定索引，僅保留座標與最少欄位，後續左連其他來源
     px = px.set_index(["asset", "ts_utc"]).sort_index()
     px = px.rename(columns={"open":"px_open","high":"px_high","low":"px_low","close":"px_close","volume_usd":"vol_usd"})
