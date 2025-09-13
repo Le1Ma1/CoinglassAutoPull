@@ -1,215 +1,211 @@
 # -*- coding: utf-8 -*-
 """
-src/upload/copy_upsert.py
-
-將 DataFrame 以 COPY + UPSERT 的方式寫入 Postgres（Supabase）。
-- 自動對齊目標表欄位與型別
-- 排除 generated 欄位（如 date_utc）
-- 支援分批上傳（chunk_by 或 chunk_rows）
+copy_upsert.py
+- 將 DataFrame 以 COPY → INSERT ... ON CONFLICT 方式上傳到 Postgres
+- 會：
+  1) 讀取目標表欄位型別與是否 GENERATED
+  2) 自動排除 GENERATED / 不存在欄位 / updated_at
+  3) 以 NULLIF(col,'')::<type> 精準 CAST（含 timestamptz）
+  4) 依 (asset, ts_utc) 做 UPSERT
 """
 
 from __future__ import annotations
 import io
-import os
-from typing import List, Sequence, Tuple, Optional, Dict
+import math
+from typing import Iterable, Dict, List, Tuple
 
 import pandas as pd
 import psycopg2
-
-from src.common.db import get_conn  # 你專案內的連線工具（讀 SUPABASE_DB_URL）
-
-
-def _split_schema_table(table_full: str | Tuple[str, str]) -> Tuple[str, str]:
-    if isinstance(table_full, tuple):
-        return table_full[0], table_full[1]
-    if "." in table_full:
-        s, t = table_full.split(".", 1)
-        return s, t
-    return "public", table_full
+from psycopg2 import sql
 
 
-def _get_target_columns(conn, schema: str, table: str) -> pd.DataFrame:
-    """
-    讀取目標表欄位資訊（排除 system schemas）。回傳欄位順序、型別、是否 generated。
-    """
+# ---------- helpers ----------
+
+def _fetch_table_columns(conn, schema: str, table: str) -> pd.DataFrame:
     q = """
     SELECT
-        c.column_name,
-        c.data_type,
-        c.is_generated
-    FROM information_schema.columns c
-    WHERE c.table_schema = %s
-      AND c.table_name = %s
-    ORDER BY c.ordinal_position
+      column_name,
+      data_type,
+      COALESCE(is_generated,'NEVER') AS is_generated
+    FROM information_schema.columns
+    WHERE table_schema = %s AND table_name = %s
+    ORDER BY ordinal_position
     """
-    df = pd.read_sql(q, conn, params=(schema, table))
-    # is_generated 一般為 'ALWAYS' 或 'NEVER'
-    return df
+    return pd.read_sql(q, conn, params=(schema, table))
 
 
-def _create_temp_table(conn, schema: str, table: str, tmp: str, drop_generated: Sequence[str]) -> None:
-    with conn.cursor() as cur:
-        cur.execute(f'CREATE TEMP TABLE "{tmp}" (LIKE "{schema}"."{table}" INCLUDING DEFAULTS) ON COMMIT DROP;')
-        for col in drop_generated:
-            cur.execute(f'ALTER TABLE "{tmp}" DROP COLUMN IF EXISTS "{col}";')
-    conn.commit()
+def _pg_cast_for(datatype: str) -> str:
+    dt = (datatype or "").lower().strip()
+    if dt == "timestamp with time zone":
+        return "timestamptz"
+    if dt == "timestamp without time zone":
+        return "timestamp"
+    if dt in ("double precision", "real", "numeric", "decimal"):
+        return "double precision"
+    if dt in ("integer", "bigint", "smallint"):
+        return dt
+    if dt in ("boolean",):
+        return "boolean"
+    if dt in ("jsonb", "json"):
+        return "jsonb" if dt == "jsonb" else "json"
+    if dt in ("date",):
+        return "date"
+    # 其餘一律以 text 接
+    return "text"
 
 
-def _prepare_columns_for_copy(df: pd.DataFrame,
-                              target_cols_meta: pd.DataFrame,
-                              key_cols: Sequence[str]) -> List[str]:
+def _ident(name: str) -> sql.Identifier:
+    return sql.Identifier(name)
+
+
+def _join_ident(names: Iterable[str]) -> sql.SQL:
+    return sql.SQL(", ").join([_ident(n) for n in names])
+
+
+def _join_values_with_cast(cols: List[str], cast_map: Dict[str, str]) -> sql.SQL:
     """
-    依目標表欄位順序，挑選實際要 COPY/UPSERT 的欄位。
-    - 排除 is_generated='ALWAYS'
-    - 必定包含 key_cols
-    - 其他欄位只取 DataFrame 真的有的
-    - 不主動加入 updated_at/ext_features（交給 default/SET now()）
+    生成 SELECT 子句：NULLIF("col",'')::<cast> AS "col"
     """
-    gen = set(target_cols_meta.loc[target_cols_meta["is_generated"] == "ALWAYS", "column_name"].tolist())
-    target_cols = target_cols_meta["column_name"].tolist()
-
-    cols: List[str] = []
-    # 先確保 key 在前
-    for k in target_cols:
-        if k in key_cols and k not in gen and k in df.columns and k not in cols:
-            cols.append(k)
-    # 其餘欄位（依目標表順序）
-    for c in target_cols:
-        if c in gen:
-            continue
-        if c in ("updated_at",):   # 由 UPSERT 時間戳自己更新
-            continue
-        if c in key_cols:
-            continue
-        if c in df.columns and c not in cols:
-            cols.append(c)
-    return cols
+    parts = []
+    for c in cols:
+        cast_to = cast_map[c]
+        parts.append(
+            sql.SQL("NULLIF({col}, '')::{cast} AS {col}").format(
+                col=_ident(c),
+                cast=sql.SQL(cast_to),
+            )
+        )
+    return sql.SQL(", ").join(parts)
 
 
-def _df_to_csv_buffer(df: pd.DataFrame, columns: List[str]) -> io.StringIO:
-    # 轉換為 CSV；NaN 以空字串表示，COPY 會視為 NULL
+def _df_to_csv_buf(df: pd.DataFrame) -> io.StringIO:
     buf = io.StringIO()
-    # 盡量保持 ts_utc 為 tz-aware ISO 字串（若來自 pandas datetime64[ns, UTC] to_csv 會輸出 +00:00）
-    df.to_csv(buf, index=False, header=True, columns=columns, na_rep="")
+    # NaN -> ''，COPY 時由 NULLIF 轉成 NULL
+    df.to_csv(buf, index=False, header=False, na_rep="")
     buf.seek(0)
     return buf
 
 
-def _upsert_from_temp(conn,
-                      schema: str,
-                      table: str,
-                      tmp: str,
-                      cols: List[str],
-                      key_cols: Sequence[str]) -> None:
-    non_keys = [c for c in cols if c not in key_cols]
-    if not non_keys:
-        # 理論上不會發生；至少會有一個非鍵欄位
-        return
-    set_clause = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in non_keys] + ['"updated_at" = now()'])
-    col_list = ", ".join([f'"{c}"' for c in cols])
-
-    sql = f'''
-    INSERT INTO "{schema}"."{table}" ({col_list})
-    SELECT {col_list} FROM "{tmp}"
-    ON CONFLICT ("{'","'.join(key_cols)}")
-    DO UPDATE SET {set_clause};
-    '''
-    with conn.cursor() as cur:
-        cur.execute(sql)
-    conn.commit()
+def _split_by_asset_year(df: pd.DataFrame) -> List[pd.DataFrame]:
+    """依 (asset, 年) 切分，避免一次過大並利於 LOG。"""
+    if "asset" not in df.columns or "ts_utc" not in df.columns:
+        return [df]
+    x = df.copy()
+    x["__year"] = pd.to_datetime(x["ts_utc"], utc=True, errors="coerce").dt.year
+    groups = []
+    for (_, _y), g in x.groupby(["asset", "__year"], dropna=False):
+        g = g.drop(columns=["__year"])
+        groups.append(g)
+    return groups
 
 
-def _copy_into_temp(conn, tmp: str, df: pd.DataFrame, cols: List[str]) -> None:
-    buf = _df_to_csv_buffer(df, cols)
-    with conn.cursor() as cur:
-        cur.copy_expert(
-            f'COPY "{tmp}" ({", ".join([f"""\"{c}\"""" for c in cols])}) FROM STDIN WITH CSV HEADER',
-            buf
-        )
-    conn.commit()
+# ---------- main ----------
 
-
-def _copy_upsert_one_batch(conn,
-                           df_batch: pd.DataFrame,
-                           schema: str,
-                           table: str,
-                           key_cols: Sequence[str],
-                           log=print) -> None:
-    if df_batch.empty:
+def copy_upsert_chunks(
+    conn,
+    schema: str,
+    table: str,
+    df: pd.DataFrame,
+    pk: Tuple[str, str] = ("asset", "ts_utc"),
+    chunk_rows: int = 200_000,
+    log=print,
+):
+    """
+    以批次（資產×年，再視需要切 row-chunks）上傳 df 到 schema.table，主鍵 pk UPSERT。
+    """
+    if df is None or len(df) == 0:
+        log(f"[upload] 無資料可上傳：{schema}.{table}")
         return
 
-    meta = _get_target_columns(conn, schema, table)
-    gen_cols = meta.loc[meta["is_generated"] == "ALWAYS", "column_name"].tolist()
+    # 讀目標表欄位
+    cols_meta = _fetch_table_columns(conn, schema, table)
+    table_cols = cols_meta["column_name"].tolist()
+    gen_cols = cols_meta.loc[cols_meta["is_generated"].str.upper() == "ALWAYS", "column_name"].tolist()
 
-    # 只保留目標表會用到的欄位（避免 COPY 出現未知欄）
-    cols = _prepare_columns_for_copy(df_batch, meta, key_cols)
+    # 排除 GENERATED 與 updated_at（交給 default/trigger）
+    exclude_cols = set(gen_cols + ["updated_at"])
 
-    # 建 staging 表
-    tmp = f"tmp_{table}_{os.getpid()}_{abs(hash(tuple(cols)))%10_000_000}"
-    _create_temp_table(conn, schema, table, tmp, drop_generated=gen_cols)
+    # 只取交集欄位
+    usable_cols = [c for c in df.columns if c in table_cols and c not in exclude_cols]
+    if not usable_cols:
+        raise ValueError(f"[upload] 找不到可上傳欄位（df={list(df.columns)} 與表 {schema}.{table} 的交集為空）")
 
-    # COPY -> UPSERT
-    _copy_into_temp(conn, tmp, df_batch[cols], cols)
-    _upsert_from_temp(conn, schema, table, tmp, cols, key_cols)
+    # CAST 對應
+    meta_map = {r["column_name"]: r["data_type"] for _, r in cols_meta.iterrows()}
+    cast_map: Dict[str, str] = {c: _pg_cast_for(meta_map[c]) for c in usable_cols}
 
-    if log:
-        log(f"[upload] upsert -> {schema}.{table} rows={len(df_batch)} cols={len(cols)} keys={list(key_cols)}")
+    # 只保留可用欄位
+    df = df[usable_cols].copy()
 
-
-def copy_upsert_chunks(conn,
-                       df: pd.DataFrame,
-                       schema: str | None = None,
-                       table: str | None = None,
-                       key_cols: Sequence[str] = ("asset", "ts_utc"),
-                       chunk_by: Optional[Sequence[str]] = None,
-                       chunk_rows: Optional[int] = None,
-                       log=print) -> None:
-    """
-    將 df 上傳到 schema.table：
-      - 若提供 chunk_by，則依欄位分組上傳（例如 ["asset","year"]）
-      - 否則若提供 chunk_rows，則按筆數切批
-      - 否則整批一次上傳
-    """
-    if conn is None:
-        conn = get_conn()
-
-    if schema is None or table is None:
-        # 允許以 "schema.table" 傳進 table
-        schema, table = _split_schema_table(table or "public.features_1d")
-
-    # 清除可能出現的重複欄位（pandas 允許同名欄；後續操作需唯一）
-    if df.columns.duplicated().any():
-        if log:
-            dups = df.columns[df.columns.duplicated()].unique().tolist()
-            log(f"[fix] 發現重複欄位: {dups} -> 進行合併（左優先）")
-        df = df.loc[:, ~df.columns.duplicated()]
-
-    # 排除 generated 欄位（就算 df 有帶上來也不上傳）
-    meta = _get_target_columns(conn, schema, table)
-    gen_cols = set(meta.loc[meta["is_generated"] == "ALWAYS", "column_name"].tolist())
-    keep_cols = [c for c in df.columns if c not in gen_cols]
-    df = df[keep_cols].copy()
-
-    # 盡量確保 ts_utc 是 tz-aware；讓 COPY 能直接進 timestamptz
+    # 時間欄位（若有）統一格式字串（ISO，含時區），讓 INSERT 階段再 CAST 成 timestamptz
     if "ts_utc" in df.columns:
-        df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
+        ts = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
+        # 以  RFC3339-ish 格式（: 分隔時區偏移），Postgres 皆可解析
+        df["ts_utc"] = ts.dt.strftime("%Y-%m-%dT%H:%M:%S%z").str.replace(
+            r"(\+|\-)(\d{2})(\d{2})$", r"\1\2:\3", regex=True
+        )
 
-    # 依需求分批
-    if chunk_by:
-        groups = df.groupby(list(chunk_by), dropna=False)
-        if log:
-            log(f"[run] 開始上傳 {schema}.{table}，共 {groups.ngroups} 組（{ '×'.join(chunk_by) }）…")
-        for _, g in groups:
-            _copy_upsert_one_batch(conn, g, schema, table, key_cols, log=log)
-        return
+    groups = _split_by_asset_year(df)
+    log(f"[run] 開始上傳 {schema}.{table}，共 {len(groups)} 組（資產×年）…")
 
-    if chunk_rows and len(df) > chunk_rows:
-        if log:
-            log(f"[run] 開始上傳 {schema}.{table}，分批大小 {chunk_rows} …")
-        for i in range(0, len(df), int(chunk_rows)):
-            g = df.iloc[i:i + int(chunk_rows)]
-            _copy_upsert_one_batch(conn, g, schema, table, key_cols, log=log)
-        return
+    with conn:
+        with conn.cursor() as cur:
+            for gi, g in enumerate(groups, 1):
+                if len(g) == 0:
+                    continue
 
-    # 單批
-    _copy_upsert_one_batch(conn, df, schema, table, key_cols, log=log)
+                total = len(g)
+                n_chunks = max(1, math.ceil(total / max(1, chunk_rows)))
+                for ci in range(n_chunks):
+                    part = g.iloc[ci*chunk_rows : (ci+1)*chunk_rows]
+                    if len(part) == 0:
+                        continue
+
+                    # 臨時表（text 欄位）
+                    tmp_name = f"tmp_copy_{table}_{gi}_{ci}"
+                    col_defs = [sql.SQL("{} text").format(_ident(c)) for c in usable_cols]
+                    cur.execute(
+                        sql.SQL("CREATE TEMP TABLE {tmp} ( {cols} ) ON COMMIT DROP").format(
+                            tmp=_ident(tmp_name),
+                            cols=sql.SQL(", ").join(col_defs),
+                        )
+                    )
+
+                    # COPY 進臨時表（無 HEADER）
+                    buf = _df_to_csv_buf(part)
+                    copy_sql = sql.SQL("COPY {tmp} ({cols}) FROM STDIN WITH (FORMAT CSV, NULL '')").format(
+                        tmp=_ident(tmp_name),
+                        cols=_join_ident(usable_cols),
+                    )
+                    cur.copy_expert(copy_sql.as_string(cur), buf)
+
+                    # INSERT ... ON CONFLICT（精準 CAST）
+                    key_cols = list(pk)
+                    insert_cols = usable_cols
+                    update_cols = [c for c in insert_cols if c not in key_cols]
+
+                    select_list = _join_values_with_cast(insert_cols, cast_map)
+
+                    insert_sql = sql.SQL("""
+                        INSERT INTO {sch}.{tbl} ({cols})
+                        SELECT {select_list}
+                        FROM {tmp}
+                        ON CONFLICT ({pkeys})
+                        DO UPDATE SET
+                          {updates}
+                    """).format(
+                        sch=_ident(schema),
+                        tbl=_ident(table),
+                        cols=_join_ident(insert_cols),
+                        select_list=select_list,
+                        tmp=_ident(tmp_name),
+                        pkeys=_join_ident(key_cols),
+                        updates=sql.SQL(", ").join([
+                            sql.SQL("{col} = EXCLUDED.{col}").format(col=_ident(c)) for c in update_cols
+                        ]) if update_cols else sql.SQL(""),
+                    )
+
+                    cur.execute(insert_sql)
+                    log(f"[upload] group {gi}/{len(groups)} chunk {ci+1}/{n_chunks} rows={len(part)} ✅")
+
+    log(f"[upload] 完成上傳 {schema}.{table}。")
