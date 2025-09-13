@@ -1,86 +1,165 @@
 # -*- coding: utf-8 -*-
-"""
-src/etl/load_sources_db.py
-
-目的：
-- 只針對「特徵 ETL」讀取來源資料。
-- 修正：coinbase_premium_index_1d 沒有 symbol 欄位，不再 select symbol（避免 UndefinedColumn）。
-- 連線：優先使用 SUPABASE_DB_URL（Render/Supabase Pooler 可含非 5432 連接埠），
-       其次 PG_DSN，再者 DATABASE_URL；其餘不變。
-- 保持原有回傳鍵名，讓後續 build_coordinate / compute_features_1d 不需改。
-"""
 from __future__ import annotations
 import os
+from datetime import date
 import psycopg2
 import pandas as pd
 
-# ------- DB 連線 -------
-
-def _dsn() -> str:
-    dsn = (
-        os.getenv("SUPABASE_DB_URL")
-    )
-    if not dsn:
-        raise RuntimeError("No DB URL found. Set SUPABASE_DB_URL (preferred) or PG_DSN / DATABASE_URL.")
-    return dsn
-
+# 以 SUPABASE_DB_URL 為主；留底 DATABASE_URL 以防本機舊習慣
 def get_conn():
-    # 直接把 DSN 丟給 psycopg2（可包含自訂連接埠，如 :6543）
-    return psycopg2.connect(_dsn())
+    url = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("Missing SUPABASE_DB_URL (or DATABASE_URL) for PostgreSQL connection")
+    # 你的 URL 內已含 host/port/ssl 等參數，這裡直接丟給 psycopg2
+    return psycopg2.connect(url)
 
-# ------- 小工具 -------
-
-def _read(conn, sql: str, params: tuple[str, str] | None = None) -> pd.DataFrame:
+def _read(conn, sql: str, params: tuple[str, str]) -> pd.DataFrame:
+    # pandas 會發出 warning（建議用 SQLAlchemy），但不影響功能
     return pd.read_sql(sql, conn, params=params)
 
-def q(tbl: str, cols: str) -> str:
-    return f"select {cols} from {tbl} where date_utc between %s and %s "
+def load_all_sources_between(start: date, end: date) -> dict[str, pd.DataFrame]:
+    s, e = start.isoformat(), end.isoformat()
+    with get_conn() as c:
+        S: dict[str, pd.DataFrame] = {}
 
-# ------- 封裝所有讀取 -------
+        S["spot"] = _read(c, """
+            select exchange,symbol,ts_utc,date_utc,open,high,low,close,volume_usd
+            from spot_candles_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-def load_all_sources_between(start_date: str, end_date: str) -> dict[str, pd.DataFrame]:
-    s, e = str(start_date), str(end_date)
-    c = get_conn()
-    S: dict[str, pd.DataFrame] = {}
+        S["fut"] = _read(c, """
+            select exchange,symbol,ts_utc,date_utc,open,high,low,close,volume_usd
+            from futures_candles_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # 價格
-    S["spot"] = _read(c, q("spot_candles_1d", "exchange,symbol,ts_utc,date_utc,open,high,low,close,volume_usd"), (s, e))
-    S["fut"]  = _read(c, q("futures_candles_1d", "exchange,symbol,ts_utc,date_utc,open,high,low,close,volume_usd"), (s, e))
+        S["oi"] = _read(c, """
+            select symbol,ts_utc,date_utc,open,high,low,close,unit
+            from futures_oi_agg_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # OI / Funding
-    S["oi"]        = _read(c, q("futures_oi_agg_1d", "symbol,ts_utc,date_utc,open,high,low,close,unit"), (s, e))
-    S["oi_stable"] = _read(c, q("futures_oi_stablecoin_1d", "exchange_list,symbol,ts_utc,date_utc,open,high,low,close"), (s, e))
-    S["oi_coinm"]  = _read(c, q("futures_oi_coin_margin_1d", "exchange_list,symbol,ts_utc,date_utc,open,high,low,close"), (s, e))
-    S["funding_oiw"]  = _read(c, q("funding_oi_weight_1d", "symbol,ts_utc,date_utc,open,high,low,close"), (s, e))
-    S["funding_volw"] = _read(c, q("funding_vol_weight_1d", "symbol,ts_utc,date_utc,open,high,low,close"), (s, e))
+        S["oi_stable"] = _read(c, """
+            select exchange_list,symbol,ts_utc,date_utc,open,high,low,close
+            from futures_oi_stablecoin_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # Long/Short
-    S["lsr_g"] = _read(c, q("long_short_global_1d", "exchange,symbol,ts_utc,date_utc,long_percent,short_percent,long_short_ratio"), (s, e))
-    S["lsr_a"] = _read(c, q("long_short_top_accounts_1d", "exchange,symbol,ts_utc,date_utc,long_percent,short_percent,long_short_ratio"), (s, e))
-    S["lsr_p"] = _read(c, q("long_short_top_positions_1d", "exchange,symbol,ts_utc,date_utc,long_percent,short_percent,long_short_ratio"), (s, e))
+        S["oi_coinm"] = _read(c, """
+            select exchange_list,symbol,ts_utc,date_utc,open,high,low,close
+            from futures_oi_coin_margin_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # Orderbook / Taker / Liquidation
-    S["ob"]    = _read(c, q("orderbook_agg_futures_1d", "exchange_list,symbol,ts_utc,date_utc,bids_usd,bids_qty,asks_usd,asks_qty,range_pct"), (s, e))
-    S["taker"] = _read(c, q("taker_vol_agg_futures_1d", "exchange_list,symbol,ts_utc,date_utc,buy_vol_usd,sell_vol_usd"), (s, e))
-    S["liq"]   = _read(c, q("liquidation_agg_1d", "exchange_list,symbol,ts_utc,date_utc,long_liq_usd,short_liq_usd"), (s, e))
+        S["funding_oiw"] = _read(c, """
+            select symbol,ts_utc,date_utc,open,high,low,close
+            from funding_oi_weight_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # ETF 與市場指標
-    S["etf_flow"] = _read(c, q("etf_bitcoin_flow_1d", "date_utc,total_flow_usd,price_usd,details"), (s, e))
-    S["etf_aum"]  = _read(c, q("etf_bitcoin_net_assets_1d", "date_utc,net_assets_usd,change_usd,price_usd"), (s, e))
-    S["etf_prem"] = _read(c, q("etf_premium_discount_1d", "date_utc,ticker,nav_usd,market_price_usd,premium_discount"), (s, e))
-    S["etf_hk"]   = _read(c, q("hk_etf_flow_1d", "date_utc,total_flow_usd,price_usd,details"), (s, e))
+        S["funding_volw"] = _read(c, """
+            select symbol,ts_utc,date_utc,open,high,low,close
+            from funding_vol_weight_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # Coinbase Premium Index（⚠️ 無 symbol 欄位）
-    S["cpi"] = _read(c, q("coinbase_premium_index_1d", "ts_utc,date_utc,premium_usd,premium_rate"), (s, e))
+        S["lsr_g"] = _read(c, """
+            select exchange,symbol,ts_utc,date_utc,long_percent,short_percent,long_short_ratio
+            from long_short_global_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # Bitfinex 借貸 / 淨多空
-    S["bfx"] = _read(c, q("bitfinex_margin_long_short_1d", "symbol,ts_utc,date_utc,long_qty,short_qty"), (s, e))
-    S["bir"] = _read(c, q("borrow_interest_rate_1d", "exchange,symbol,ts_utc,date_utc,interest_rate"), (s, e))
+        S["lsr_a"] = _read(c, """
+            select exchange,symbol,ts_utc,date_utc,long_percent,short_percent,long_short_ratio
+            from long_short_top_accounts_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    # On-chain/指標
-    S["puell"] = _read(c, q("idx_puell_multiple_daily", "date_utc,price,puell_multiple"), (s, e))
-    S["s2f"]   = _read(c, q("idx_stock_to_flow_daily", "date_utc,price,next_halving"), (s, e))
-    S["pi"]    = _read(c, q("idx_pi_cycle_daily", "date_utc,price,ma_110,ma_350_x2"), (s, e))
+        S["lsr_p"] = _read(c, """
+            select exchange,symbol,ts_utc,date_utc,long_percent,short_percent,long_short_ratio
+            from long_short_top_positions_1d
+            where date_utc between %s and %s
+        """, (s, e))
 
-    c.close()
-    return S
+        S["ob"] = _read(c, """
+            select exchange_list,symbol,ts_utc,date_utc,bids_usd,bids_qty,asks_usd,asks_qty,range_pct
+            from orderbook_agg_futures_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["taker"] = _read(c, """
+            select exchange_list,symbol,ts_utc,date_utc,buy_vol_usd,sell_vol_usd
+            from taker_vol_agg_futures_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["liq"] = _read(c, """
+            select exchange_list,symbol,ts_utc,date_utc,long_liq_usd,short_liq_usd
+            from liquidation_agg_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        # 下列 ETF 與指標表雖不是每個特徵都要用，但保留載入以便 left join 時可用
+        S["etf_flow"] = _read(c, """
+            select date_utc,total_flow_usd,price_usd,details
+            from etf_bitcoin_flow_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["etf_aum"] = _read(c, """
+            select date_utc,net_assets_usd,change_usd,price_usd
+            from etf_bitcoin_net_assets_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["etf_prem"] = _read(c, """
+            select date_utc,ticker,nav_usd,market_price_usd,premium_discount
+            from etf_premium_discount_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["etf_hk"] = _read(c, """
+            select date_utc,total_flow_usd,price_usd,details
+            from hk_etf_flow_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        # ⚠️ cpi 沒有 symbol 欄位，不要查 symbol
+        S["cpi"] = _read(c, """
+            select ts_utc,date_utc,premium_usd,premium_rate
+            from coinbase_premium_index_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["bfx"] = _read(c, """
+            select symbol,ts_utc,date_utc,long_qty,short_qty
+            from bitfinex_margin_long_short_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["bir"] = _read(c, """
+            select exchange,symbol,ts_utc,date_utc,interest_rate
+            from borrow_interest_rate_1d
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["puell"] = _read(c, """
+            select date_utc,price,puell_multiple
+            from idx_puell_multiple_daily
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["s2f"] = _read(c, """
+            select date_utc,price,next_halving
+            from idx_stock_to_flow_daily
+            where date_utc between %s and %s
+        """, (s, e))
+
+        S["pi"] = _read(c, """
+            select date_utc,price,ma_110,ma_350_x2
+            from idx_pi_cycle_daily
+            where date_utc between %s and %s
+        """, (s, e))
+
+        return S
