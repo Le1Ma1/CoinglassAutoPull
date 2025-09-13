@@ -1,20 +1,11 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-import os
 from datetime import date
-import psycopg2
 import pandas as pd
-
-# 以 SUPABASE_DB_URL 為主；留底 DATABASE_URL 以防本機舊習慣
-def get_conn():
-    url = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("Missing SUPABASE_DB_URL (or DATABASE_URL) for PostgreSQL connection")
-    # 你的 URL 內已含 host/port/ssl 等參數，這裡直接丟給 psycopg2
-    return psycopg2.connect(url)
+from src.common.db import get_conn
 
 def _read(conn, sql: str, params: tuple[str, str]) -> pd.DataFrame:
-    # pandas 會發出 warning（建議用 SQLAlchemy），但不影響功能
+    # pandas 會對非 SQLAlchemy 連線提出 warning，功能不受影響
     return pd.read_sql(sql, conn, params=params)
 
 def load_all_sources_between(start: date, end: date) -> dict[str, pd.DataFrame]:
@@ -100,7 +91,6 @@ def load_all_sources_between(start: date, end: date) -> dict[str, pd.DataFrame]:
             where date_utc between %s and %s
         """, (s, e))
 
-        # 下列 ETF 與指標表雖不是每個特徵都要用，但保留載入以便 left join 時可用
         S["etf_flow"] = _read(c, """
             select date_utc,total_flow_usd,price_usd,details
             from etf_bitcoin_flow_1d
@@ -125,7 +115,7 @@ def load_all_sources_between(start: date, end: date) -> dict[str, pd.DataFrame]:
             where date_utc between %s and %s
         """, (s, e))
 
-        # ⚠️ cpi 沒有 symbol 欄位，不要查 symbol
+        # 沒有 symbol 欄位
         S["cpi"] = _read(c, """
             select ts_utc,date_utc,premium_usd,premium_rate
             from coinbase_premium_index_1d

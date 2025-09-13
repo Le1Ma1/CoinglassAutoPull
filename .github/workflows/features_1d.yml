@@ -1,51 +1,41 @@
 name: features_1d
 
 on:
-  schedule:
-    # 每天 03:00 (UTC) 執行；如需台北時間 11:00，請改成 '0 3 * * *' -> '0 3 * * *' 是範例，請依需求調整
-    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       days:
-        description: '回填天數 (預設 7)'
+        description: "更新最近幾天"
         required: false
-        default: '7'
+        default: "7"
       end_date:
-        description: '結束日期 YYYY-MM-DD (預設 T-1)'
+        description: "END_DATE (UTC, YYYY-MM-DD)，預設昨天"
         required: false
-        default: ''
+        default: ""
+  schedule:
+    - cron: "5 2 * * *"   # 每天 02:05 UTC 跑一次
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    concurrency:
-      group: features_1d
-      cancel-in-progress: false
-
+    timeout-minutes: 30
     env:
-      # 主要環境變數（從 Secrets 注入）
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-      SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
-
-      # 時區（若你在程式內有用到）
-      TZ: Asia/Taipei
-
-      # 執行參數（可被手動觸發時覆蓋）
+      DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}  # 給任何舊程式使用
       DAYS: ${{ inputs.days || '7' }}
-      END_DATE: ${{ inputs.end_date || '' }}
+      END_DATE: ${{ inputs.end_date }}
 
     steps:
+      - name: Set up job
+        run: echo "Starting…"
+
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
 
       - name: Install deps
         run: |
@@ -53,18 +43,14 @@ jobs:
           pip install -r requirements.txt
 
       - name: Map DSN for legacy code
-        # 舊代碼若讀 DATABASE_URL/PG_DSN，也能拿到同一條連線字串
         run: |
-          echo "DATABASE_URL=$SUPABASE_DB_URL" >> $GITHUB_ENV
-          echo "PG_DSN=$SUPABASE_DB_URL" >> $GITHUB_ENV
+          echo "PG_DSN=${SUPABASE_DB_URL}" >> $GITHUB_ENV
 
       - name: Test DB connection
-        # 你原有的測試腳本；若不用可刪除此步驟
-        run: |
-          python scripts/test_conn.py
+        run: python scripts/test_conn.py
 
-      - name: Run features pipeline (unchanged)
-        shell: bash
-        run: |
-          chmod +x scripts/run_features_1d.sh
-          ./scripts/run_features_1d.sh
+      - name: Run features pipeline
+        env:
+          DAYS: ${{ env.DAYS }}
+          END_DATE: ${{ env.END_DATE }}
+        run: bash scripts/run_features_1d.sh
