@@ -8,7 +8,7 @@ import os
 import psycopg2
 
 def _dsn() -> str:
-    url = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
+    url = os.getenv("SUPABASE_DB_URL")
     if not url:
         raise RuntimeError("Missing SUPABASE_DB_URL (or DATABASE_URL).")
     return url
