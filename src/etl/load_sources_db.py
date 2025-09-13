@@ -1,17 +1,16 @@
 # -*- coding: utf-8 -*-
-"""
-從資料庫載入 1d 各來源資料，時間區間 [start_date, end_date]
-僅「讀取」，不改動原始表。供特徵 ETL 使用。
-"""
 from __future__ import annotations
-import pandas as pd
 from datetime import date
+import pandas as pd
+
+# 只動用你特徵 ETL 的共用連線；會優先讀 SUPABASE_DB_URL，退回 DATABASE_URL
 from src.common.db import get_conn
 
+
 def _read(sql: str, params: tuple) -> pd.DataFrame:
-    with get_conn() as c:
-        # pandas 會提示 SQLAlchemy，這裡沿用 psycopg2 以保持你原設計
-        return pd.read_sql(sql, c, params=params)
+    with get_conn() as conn:
+        return pd.read_sql(sql, conn, params=params)
+
 
 def load_all_sources_between(start_date: date, end_date: date) -> dict[str, pd.DataFrame]:
     p = (start_date, end_date)
@@ -118,6 +117,7 @@ def load_all_sources_between(start_date: date, end_date: date) -> dict[str, pd.D
         where date_utc between %s and %s
     """, p)
 
+    # 修正點：coinbase_premium_index_1d 沒有 symbol 欄位
     cpi = _read("""
         select ts_utc, date_utc, premium_usd, premium_rate
         from coinbase_premium_index_1d
