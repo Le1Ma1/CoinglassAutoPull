@@ -2,7 +2,7 @@
 """
 build_features_labels.py
 - 抓來源資料 -> 建骨幹座標 -> 左連全部來源 -> 計算特徵 -> 只輸出近 N 天 -> 上傳
-- 只調整特徵 ETL，讀取使用 SUPABASE_DB_URL；不影響你原本的原始數據 ETL。
+- 只調整「特徵 ETL」；讀/寫都走 SUPABASE_DB_URL，不影響原始數據 ETL。
 """
 from __future__ import annotations
 import os
@@ -13,12 +13,7 @@ from datetime import datetime, timedelta, date
 from src.etl.load_sources_db import load_all_sources_between
 from src.etl.build_coordinate import build_price_coordinate, left_join_all
 from src.features.compute_features_1d import compute_features, REQUIRED_HISTORY_DAYS
-
-# 如你已有上傳模組，這裡沿用（不要改你原有行為）
-try:
-    from src.upload.copy_upsert import upsert_dataframe as _real_upsert  # 你的函式若叫別名，這裡改成對應名稱即可
-except Exception:
-    _real_upsert = None  # 若環境無上傳工具，仍可本地跑特徵計算
+from src.upload.copy_upsert import copy_upsert_chunks  # 用你現成的上傳工具
 
 def iso(d: date) -> str: return d.isoformat()
 def _date(s: str) -> date: return datetime.strptime(s, "%Y-%m-%d").date()
@@ -27,7 +22,7 @@ def _print_src_shape(S: dict):
     for k, v in S.items():
         if v is None: 
             continue
-        print(f"[load_db] {k:<28} rows={len(v)}")
+        print(f"[load_db] {k:<27} rows={len(v)}")
 
 def _merge_lsr(lsr_g: pd.DataFrame|None, lsr_a: pd.DataFrame|None, lsr_p: pd.DataFrame|None) -> pd.DataFrame|None:
     frames = []
@@ -47,16 +42,56 @@ def _merge_lsr(lsr_g: pd.DataFrame|None, lsr_a: pd.DataFrame|None, lsr_p: pd.Dat
         out = out.merge(f, how="outer", on=["symbol","ts_utc","date_utc"])
     return out
 
-def _upload(df: pd.DataFrame, table: str, pk=("asset","date_utc")):
-    if _real_upsert is not None:
-        _real_upsert(df, table_name=table, pk_cols=list(pk))
-    print(f"[upload] chunk 1/1 rows={len(df)} (100%)")
+def _upload_features(feat: pd.DataFrame):
+    # 依資產×年份切塊，上傳到 public.features_1d（目標表有 PK (asset, ts_utc)）
+    if not pd.api.types.is_datetime64_any_dtype(feat["ts_utc"]):
+        feat["ts_utc"] = pd.to_datetime(feat["ts_utc"], utc=True)
+    feat["year"] = feat["ts_utc"].dt.year
+    groups = list(feat.groupby(["asset","year"], sort=True))
+    total = len(groups)
+    print(f"[run] 開始上傳 features_1d，共 {total} 組（資產×年）…")
+    done = 0
+    for (a,y), g in groups:
+        g = g.drop(columns=["year"])
+        prefix = f" [{a} {y}]"
+        copy_upsert_chunks(
+            g,
+            table="public.features_1d",
+            chunk_rows=100_000,
+            prefix=prefix
+        )
+        done += 1
+        pct = int(done*100/total) if total else 100
+        print(f"[upload] {done}/{total} ({pct}%) 完成 {a}-{y} rows={len(g)}")
 
 def _build_labels(df_all: pd.DataFrame, start_date: date, end_date: date) -> pd.DataFrame:
     df = df_all.sort_values(["asset","ts_utc"]).copy()
     df["fwd_1d_ret"] = df.groupby("asset", dropna=False)["px_close"].pct_change(-1)
     labels = df.loc[(df["date_utc"]>=start_date)&(df["date_utc"]<=end_date), ["asset","ts_utc","date_utc","fwd_1d_ret"]]
     return labels.reset_index(drop=True)
+
+def _upload_labels(lbl: pd.DataFrame):
+    # 若沒有 labels_1d 表，僅警告不阻塞
+    if not len(lbl):
+        print("[run] labels_1d 無資料可上傳，略過。")
+        return
+    try:
+        if not pd.api.types.is_datetime64_any_dtype(lbl["ts_utc"]):
+            lbl["ts_utc"] = pd.to_datetime(lbl["ts_utc"], utc=True)
+        lbl["year"] = lbl["ts_utc"].dt.year
+        groups = list(lbl.groupby(["asset","year"], sort=True))
+        print(f"[run] 開始上傳 labels_1d，共 {len(groups)} 組（資產×年）…")
+        for (a,y), g in groups:
+            g = g.drop(columns=["year"])
+            copy_upsert_chunks(
+                g,
+                table="public.labels_1d" if os.getenv("LABELS_SCHEMA","public")=="public" else "labels_1d",
+                chunk_rows=100_000,
+                prefix=f" [LBL {a} {y}]"
+            )
+        print("[run] labels_1d 上傳完成。")
+    except Exception as e:
+        print(f"[warn] 上傳 labels_1d 失敗（不影響 features_1d）：{e}")
 
 def main():
     days = int(os.getenv("DAYS", "7"))
@@ -68,7 +103,7 @@ def main():
     print(f"[run] 抓取來源 {iso(hist_start)} ~ {iso(end_date)}")
     t0 = time.time()
 
-    # 讀來源
+    # 讀來源（走 SUPABASE_DB_URL）
     S = load_all_sources_between(hist_start, end_date)
     _print_src_shape(S)
     alias = {
@@ -87,7 +122,7 @@ def main():
     # 建價格座標
     print("[run] 建立價格座標…")
     px = build_price_coordinate({"spot":S.get("spot"), "fut":S.get("fut")})
-    print(f"[run] 座標 rows={len(px)}, cols={['px_open','px_high','px_low','px_close','vol_usd']}")
+    print(f"[run] 座標 rows={len(px)}, cols={list(px.columns)}")
 
     # 左連
     print("[run] 左連接來源…")
@@ -114,15 +149,15 @@ def main():
     print("[run] 計算特徵…")
     feats = compute_features(df, out_start=start_date, out_end=end_date, log=print)
     print(f"[run] 特徵完成 rows={len(feats)}, cols={len(feats.columns)}")
-    print("[run] 上傳 features_1d…")
-    _upload(feats, "features_1d")
 
-    # 標籤
+    # 上傳 features_1d
+    _upload_features(feats)
+
+    # 標籤（可選）
     print("[run] 計算標籤…")
     labels = _build_labels(df, start_date, end_date)
     print(f"[run] 標籤完成 rows={len(labels)}")
-    print("[run] 上傳 labels_1d…")
-    _upload(labels, "labels_1d", pk=("asset","date_utc"))
+    _upload_labels(labels)
 
     print(f"[run] 全部完成。耗時 {round(time.time()-t0,1)}s")
 
