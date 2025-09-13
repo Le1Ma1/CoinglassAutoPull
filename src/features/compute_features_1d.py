@@ -1,86 +1,275 @@
 # -*- coding: utf-8 -*-
 """
-1d 特徵計算（需要長窗時會依 REQUIRED_HISTORY_DAYS 由 CLI 多抓歷史）
-僅寫入 features_1d/labels_1d，不動原始表。
+compute_features_1d.py
+- 依據價格骨幹 + 左連的來源，計算日頻特徵
+- 僅用 groupby.transform / shift / rolling，避免 DataFrame 賦值錯誤與 FutureWarning
+- 與 features_1d schema 對齊欄位命名（含 lsr_top_accts / lsr_top_pos）
 """
-from __future__ import annotations
-import pandas as pd
-import numpy as np
-from typing import Callable
-from datetime import date
 
-# 覆蓋 252 日等長窗指標
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+from datetime import date
+from typing import Iterable, Optional, Callable
+
+# 需要的歷史窗長度（最大用到 252，再加緩衝）
 REQUIRED_HISTORY_DAYS = 400
 
-def _cover_log(name: str, s: pd.Series, total: int, log: Callable[[str], None]):
-    nn = int(s.notna().sum())
-    miss = total - nn
-    pct = (miss / total * 100.0) if total else 0.0
-    log(f"[feature] {name}: non-null={nn}/{total} ({round(pct,1)}% NaN)")
+def _roll_mean(g: pd.core.groupby.SeriesGroupBy, n: int, mp: Optional[int] = None) -> pd.Series:
+    if mp is None:
+        mp = max(2, n // 3)
+    return g.transform(lambda s: s.rolling(n, min_periods=mp).mean())
 
-def compute_features(df_all: pd.DataFrame, out_start: date, out_end: date, log: Callable[[str], None]=print) -> pd.DataFrame:
-    df = df_all.sort_values(["asset","date_utc","ts_utc"]).copy()
+def _roll_std(g: pd.core.groupby.SeriesGroupBy, n: int, mp: Optional[int] = None) -> pd.Series:
+    if mp is None:
+        mp = max(2, n // 3)
+    return g.transform(lambda s: s.rolling(n, min_periods=mp).std())
 
-    # 基礎價格系列
-    px = df.groupby("asset", dropna=False).apply(lambda x: x.set_index("date_utc")["px_close"]).unstack(0)
-    # 以每個 asset 的時間序列各自計算
-    def by_asset(calc):
-        return df.groupby("asset", dropna=False).apply(calc).reset_index(level=0, drop=True)
+def _pct_change(g: pd.core.groupby.SeriesGroupBy, n: int = 1) -> pd.Series:
+    return g.pct_change(n)
 
-    # 動能 / 報酬
-    df["ret_1d"] = by_asset(lambda x: x["px_close"].pct_change(1))
-    for n in [3,5,10,20,60,120,252]:
-        df[f"roc_{n}"] = by_asset(lambda x: x["px_close"].pct_change(n))
-        df[f"mom_{n}"] = by_asset(lambda x: x["px_close"].diff(n))
-    # 均線
-    for n in [10,20,60,120,252]:
-        df[f"sma_{n}"] = by_asset(lambda x: x["px_close"].rolling(n, min_periods=1).mean())
-    # EMA & MACD(12,26,9)
-    df["ema_12"] = by_asset(lambda x: x["px_close"].ewm(span=12, adjust=False).mean())
-    df["ema_26"] = by_asset(lambda x: x["px_close"].ewm(span=26, adjust=False).mean())
+def _zscore(series: pd.Series, g: pd.core.groupby.SeriesGroupBy, n: int) -> pd.Series:
+    m = _roll_mean(g, n)
+    s = _roll_std(g, n).replace(0, np.nan)
+    return (series - m) / s
+
+def _safe_ratio(a: pd.Series, b: pd.Series) -> pd.Series:
+    return a / b.replace(0, np.nan)
+
+def _pct_rank_within_day(df: pd.DataFrame, col: str) -> pd.Series:
+    return df.groupby("date_utc")[col].rank(pct=True)
+
+def compute_features(
+    df_all: pd.DataFrame,
+    out_start: date,
+    out_end: date,
+    log: Callable[[str], None] = print
+) -> pd.DataFrame:
+    """
+    df_all: 來自 build_coordinate.left_join_all 的資料
+            必含 ['asset','ts_utc','date_utc','px_open','px_high','px_low','px_close','vol_usd']
+    """
+    # 1) 準備
+    df = df_all.sort_values(["asset", "ts_utc"]).copy()
+    g = df.groupby("asset", dropna=False, sort=False)
+
+    # ---- 先把來源欄位對齊 schema ----
+    # LSR 欄位改名
+    if "lsr_top_accounts" in df.columns and "lsr_top_accts" not in df.columns:
+        df = df.rename(columns={"lsr_top_accounts": "lsr_top_accts"})
+    if "lsr_top_positions" in df.columns and "lsr_top_pos" not in df.columns:
+        df = df.rename(columns={"lsr_top_positions": "lsr_top_pos"})
+
+    # 2) 市場微結構衍生
+    df["ob_imb"] = _safe_ratio(df.get("ob_bids_usd"), (df.get("ob_bids_usd") + df.get("ob_asks_usd")))
+    df["depth_ratio_q"] = _safe_ratio(df.get("ob_bids_qty"), (df.get("ob_bids_qty") + df.get("ob_asks_qty")))
+    df["taker_imb"] = _safe_ratio(df.get("taker_buy_usd") - df.get("taker_sell_usd"),
+                                  (df.get("taker_buy_usd") + df.get("taker_sell_usd")))
+    df["liq_net"] = df.get("liq_long_usd") - df.get("liq_short_usd")
+
+    # 3) 價格路徑與動能
+    df["ret_1d"] = _pct_change(g["px_close"], 1)
+
+    for n in [3, 5, 10, 20, 60, 120, 252]:
+        df[f"roc_{n}"] = _pct_change(g["px_close"], n)
+        df[f"mom_{n}"] = df[f"roc_{n}"]  # 同定義
+
+    for n in [10, 20, 60, 120, 252]:
+        df[f"sma_{n}"] = _roll_mean(g["px_close"], n)
+
+    # EMA / MACD
+    df["ema_12"] = g["px_close"].transform(lambda s: s.ewm(span=12, adjust=False).mean())
+    df["ema_26"] = g["px_close"].transform(lambda s: s.ewm(span=26, adjust=False).mean())
     df["macd"] = df["ema_12"] - df["ema_26"]
-    df["macd_signal_9"] = by_asset(lambda x: x["macd"].ewm(span=9, adjust=False).mean())
+    df["macd_signal_9"] = g["macd"].transform(lambda s: s.ewm(span=9, adjust=False).mean())
     df["macd_hist"] = df["macd"] - df["macd_signal_9"]
+
     # 布林
-    mid = by_asset(lambda x: x["px_close"].rolling(20, min_periods=1).mean())
-    std = by_asset(lambda x: x["px_close"].rolling(20, min_periods=1).std())
-    df["bb_mid_20"] = mid
-    df["bb_up_20"]  = mid + 2*std
-    df["bb_dn_20"]  = mid - 2*std
-    # ATR
-    def _atr(x):
-        tr = pd.concat([
-            (x["px_high"]-x["px_low"]).rename("hl"),
-            (x["px_high"]-x["px_close"].shift(1)).abs().rename("hc"),
-            (x["px_low"]-x["px_close"].shift(1)).abs().rename("lc"),
-        ], axis=1).max(axis=1)
-        return tr.rolling(14, min_periods=1).mean()
-    df["atr_14"] = by_asset(_atr)
-    # 實現波動率（對數報酬平方的移動平均）
-    for n in [20,60,120]:
-        df[f"rv_{n}"] = by_asset(lambda x: np.log(x["px_close"]).diff().pow(2).rolling(n, min_periods=1).mean())
+    bb_mid = df["sma_20"]
+    bb_std = _roll_std(g["px_close"], 20)
+    df["bb_mid_20"] = bb_mid
+    df["bb_up_20"] = bb_mid + 2.0 * bb_std
+    df["bb_dn_20"] = bb_mid - 2.0 * bb_std
 
-    # Z-score of returns
-    for n in [20,60,120]:
-        r = by_asset(lambda x: x["px_close"].pct_change(1))
-        m = by_asset(lambda x: r.rolling(n, min_periods=1).mean())
-        s = by_asset(lambda x: r.rolling(n, min_periods=1).std())
-        df[f"z_ret_{n}"] = (r - m) / s.replace(0, np.nan)
+    # ATR-14
+    prev_close = g["px_close"].shift(1)
+    tr1 = (df["px_high"] - df["px_low"]).abs()
+    tr2 = (df["px_high"] - prev_close).abs()
+    tr3 = (df["px_low"] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr_14"] = g["px_close"].transform(lambda s: 0)  # 先占位
+    df["tr"] = tr
+    df["atr_14"] = g["tr"].transform(lambda s: s.rolling(14, min_periods=2).mean())
+    df.drop(columns=["tr"], inplace=True)
 
-    # === 覆蓋率 LOG（針對 out 窗口）===
-    out = df[(df["date_utc"]>=out_start) & (df["date_utc"]<=out_end)].copy()
-    total = len(out)
-    for c in ["ret_1d"] + [f"roc_{n}" for n in [3,5,10,20,60,120,252]] + \
-             [f"mom_{n}" for n in [3,5,10,20,60,120,252]] + \
-             [f"sma_{n}" for n in [10,20,60,120,252]] + \
-             ["ema_12","ema_26","macd","macd_signal_9","macd_hist",
-              "bb_mid_20","bb_up_20","bb_dn_20","atr_14"] + \
-             [f"rv_{n}" for n in [20,60,120]] + \
-             [f"z_ret_{n}" for n in [20,60,120]]:
-        _cover_log(c, out[c], total, log)
+    # 已實現波動（這裡用 ret_1d 的 rolling std）
+    for n in [20, 60, 120]:
+        df[f"rv_{n}"] = _roll_std(g["ret_1d"], n)
 
-    # 僅輸出 out 窗口
-    feats = out.drop(columns=[]).copy()
-    keep_cols = ["asset","ts_utc","date_utc"] + [c for c in feats.columns if c not in ["asset","ts_utc","date_utc"]]
-    feats = feats[keep_cols].reset_index(drop=True)
-    return feats
+    # z-score of returns
+    for n in [20, 60, 120]:
+        df[f"z_ret_{n}"] = _zscore(df["ret_1d"], g["ret_1d"], n)
+
+    # 4) OI / Funding / LSR 相關
+    # OI 變化與 z
+    if "oi_agg_close" in df.columns:
+        df["d_oi_1"] = _pct_change(g["oi_agg_close"], 1)
+        for n in [5, 20, 60]:
+            df[f"oi_roc_{n}"] = _pct_change(g["oi_agg_close"], n)
+        df["oi_z_60"] = _zscore(df["oi_agg_close"], g["oi_agg_close"], 60)
+
+    if "funding_oiw_close" in df.columns:
+        df["d_funding_1"] = _pct_change(g["funding_oiw_close"], 1)
+        df["funding_ma_20"] = _roll_mean(g["funding_oiw_close"], 20)
+        df["funding_ma_60"] = _roll_mean(g["funding_oiw_close"], 60)
+        df["funding_z_60"]  = _zscore(df["funding_oiw_close"], g["funding_oiw_close"], 60)
+
+    # LSR（global / top_accts / top_pos）
+    for col, ma_name, z_name in [
+        ("lsr_global", "lsr_ma20_global", "lsr_z60_global"),
+        ("lsr_top_accts", "lsr_ma20_top_accts", "lsr_z60_top_accts"),
+        ("lsr_top_pos", "lsr_ma20_top_pos", "lsr_z60_top_pos"),
+    ]:
+        if col in df.columns:
+            df[ma_name] = _roll_mean(g[col], 20)
+            df[z_name]  = _zscore(df[col], g[col], 60)
+
+    # Orderbook / Taker 的 MA 與 z
+    if "ob_imb" in df.columns:
+        df["ob_imb_ma20"] = _roll_mean(g["ob_imb"], 20)
+        df["ob_imb_z60"]  = _zscore(df["ob_imb"], g["ob_imb"], 60)
+
+    if "depth_ratio_q" in df.columns:
+        df["depth_ratio_q_ma20"] = _roll_mean(g["depth_ratio_q"], 20)
+        df["depth_ratio_q_z60"]  = _zscore(df["depth_ratio_q"], g["depth_ratio_q"], 60)
+
+    if "taker_imb" in df.columns:
+        df["taker_imb_ma20"] = _roll_mean(g["taker_imb"], 20)
+        df["taker_imb_z60"]  = _zscore(df["taker_imb"], g["taker_imb"], 60)
+
+    if "taker_buy_usd" in df.columns:
+        df["taker_buy_ma20"] = _roll_mean(g["taker_buy_usd"], 20)
+        df["taker_buy_z60"]  = _zscore(df["taker_buy_usd"], g["taker_buy_usd"], 60)
+
+    if "taker_sell_usd" in df.columns:
+        df["taker_sell_ma20"] = _roll_mean(g["taker_sell_usd"], 20)
+        df["taker_sell_z60"]  = _zscore(df["taker_sell_usd"], g["taker_sell_usd"], 60)
+
+    if "liq_net" in df.columns:
+        df["liq_z60"] = _zscore(df["liq_net"], g["liq_net"], 60)
+
+    # 5) ETF / 指數 / 其它
+    if "etf_flow_usd" in df.columns:
+        df["etf_flow_z60"] = _zscore(df["etf_flow_usd"], g["etf_flow_usd"], 60)
+
+    if "etf_aum_usd" in df.columns:
+        df["etf_aum_roc_5"]  = _pct_change(g["etf_aum_usd"], 5)
+        df["etf_aum_roc_20"] = _pct_change(g["etf_aum_usd"], 20)
+
+    if "etf_premdisc" in df.columns:
+        df["premdisc_ma20"] = _roll_mean(g["etf_premdisc"], 20)
+        df["premdisc_z60"]  = _zscore(df["etf_premdisc"], g["etf_premdisc"], 60)
+
+    if "cpi_premium_rate" in df.columns:
+        df["cpi_ma20"] = _roll_mean(g["cpi_premium_rate"], 20)
+        df["cpi_z60"]  = _zscore(df["cpi_premium_rate"], g["cpi_premium_rate"], 60)
+
+    if "bfx_long_qty" in df.columns and "bfx_short_qty" in df.columns:
+        df["bfx_lr"] = _safe_ratio(df["bfx_long_qty"], df["bfx_short_qty"])
+        df["bfx_lr_d1"] = _pct_change(g["bfx_lr"], 1)
+
+    if "borrow_ir" in df.columns:
+        df["borrow_ir_ma20"] = _roll_mean(g["borrow_ir"], 20)
+
+    if "puell" in df.columns:
+        df["puell_d1"] = _pct_change(g["puell"], 1)
+
+    if "s2f_next_halving" in df.columns:
+        # 整數欄不做比率，做一階差分（保持浮點）
+        df["s2f_d1"] = g["s2f_next_halving"].diff(1)
+
+    if "pi_ma110" in df.columns:
+        df["pi_ma110_d1"] = _pct_change(g["pi_ma110"], 1)
+    if "pi_ma350x2" in df.columns:
+        df["pi_ma350x2_d1"] = _pct_change(g["pi_ma350x2"], 1)
+
+    # 6) 橫截面排名 & 相對 BTC
+    df["xsec_ret_rank"] = _pct_rank_within_day(df, "ret_1d")
+    if "mom_20" in df.columns:
+        df["xsec_mom_rank_20"] = _pct_rank_within_day(df, "mom_20")
+    if "rv_60" in df.columns:
+        df["xsec_vol_rank_60"] = _pct_rank_within_day(df, "rv_60")
+
+    # 相對 BTC：以 mom_20 對同日 BTC（資產名包含 'BTC' 的首筆）做差
+    df["rel_to_btc"] = np.nan
+    if "mom_20" in df.columns:
+        btc_mask = df["asset"].astype(str).str.contains("BTC", case=False, na=False)
+        if btc_mask.any():
+            anchor = (
+                df.loc[btc_mask, ["date_utc", "mom_20"]]
+                  .dropna(subset=["mom_20"])
+                  .groupby("date_utc", as_index=True)["mom_20"]
+                  .first()
+            )
+            df["rel_to_btc"] = df["mom_20"] - df["date_utc"].map(anchor)
+
+    # 7) 只輸出 out window，並整理欄位順序
+    out = df[(df["date_utc"] >= out_start) & (df["date_utc"] <= out_end)].copy()
+
+    # 與 schema 對齊的欄位順序（缺的自動略過）
+    schema_cols = [
+        "asset","ts_utc","px_open","px_high","px_low","px_close","vol_usd",
+        "oi_agg_close","oi_stable_close","oi_coinm_close",
+        "funding_oiw_close","funding_volw_close",
+        "lsr_global","lsr_top_accts","lsr_top_pos",
+        "ob_bids_usd","ob_asks_usd","ob_bids_qty","ob_asks_qty",
+        "ob_imb","depth_ratio_q",
+        "taker_buy_usd","taker_sell_usd","taker_imb",
+        "liq_long_usd","liq_short_usd","liq_net",
+        "etf_flow_usd","etf_aum_usd","etf_premdisc",
+        "cpi_premium_rate","bfx_long_qty","bfx_short_qty","borrow_ir",
+        "puell","s2f_next_halving","pi_ma110","pi_ma350x2",
+        "ret_1d",
+        "roc_3","roc_5","roc_10","roc_20","roc_60","roc_120","roc_252",
+        "mom_3","mom_5","mom_10","mom_20","mom_60","mom_120","mom_252",
+        "sma_10","sma_20","sma_60","sma_120","sma_252",
+        "ema_12","ema_26","macd","macd_signal_9","macd_hist",
+        "bb_mid_20","bb_up_20","bb_dn_20",
+        "atr_14","rv_20","rv_60","rv_120",
+        "z_ret_20","z_ret_60","z_ret_120",
+        "d_oi_1","oi_roc_5","oi_roc_20","oi_roc_60","oi_z_60",
+        "d_funding_1","funding_ma_20","funding_ma_60","funding_z_60",
+        "lsr_ma20_global","lsr_z60_global",
+        "lsr_ma20_top_accts","lsr_z60_top_accts",
+        "lsr_ma20_top_pos","lsr_z60_top_pos",
+        "ob_imb_ma20","ob_imb_z60",
+        "depth_ratio_q_ma20","depth_ratio_q_z60",
+        "taker_imb_ma20","taker_imb_z60",
+        "taker_buy_ma20","taker_sell_ma20",
+        "taker_buy_z60","taker_sell_z60",
+        "liq_z60","etf_flow_z60",
+        "etf_aum_roc_5","etf_aum_roc_20",
+        "premdisc_ma20","premdisc_z60",
+        "cpi_ma20","cpi_z60",
+        "bfx_lr","bfx_lr_d1",
+        "borrow_ir_ma20","puell_d1","s2f_d1","pi_ma110_d1","pi_ma350x2_d1",
+        "xsec_ret_rank","xsec_mom_rank_20","xsec_vol_rank_60",
+        "rel_to_btc",
+    ]
+    present = [c for c in schema_cols if c in out.columns]
+    # schema 裡有 date_utc 產生欄，但你表是 STORED GENERATED；這裡也一起輸出方便檢視
+    present = ["asset","ts_utc","date_utc"] + [c for c in present if c not in ("asset","ts_utc","date_utc")]
+
+    # LOG 非空覆蓋率
+    log(f"[compute_features] input rows={len(df_all)}, cols={list(df_all.columns)}")
+    for c in present:
+        if c in ("asset","ts_utc","date_utc"):
+            continue
+        nn = out[c].notna().sum()
+        tot = len(out)
+        if tot:
+            miss_pct = round(100.0 * (1 - nn / tot), 1)
+            log(f"[feature] {c}: non-null={nn}/{tot} ({miss_pct}% NaN)")
+
+    out = out[present].reset_index(drop=True)
+    return out
