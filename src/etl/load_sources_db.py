@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
+"""
+從資料庫載入 1d 各來源資料，時間區間 [start_date, end_date]
+僅「讀取」，不改動原始表。供特徵 ETL 使用。
+"""
+from __future__ import annotations
 import pandas as pd
 from datetime import date
-from typing import Dict, Optional
 from src.common.db import get_conn
-
-# 以 pandas.read_sql 讀取，沿用你原本欄位命名（每日彙總 1d 表）
-# 只做必要的欄位選取與時間範圍過濾，不改變你的資料內容
 
 def _read(sql: str, params: tuple) -> pd.DataFrame:
     with get_conn() as c:
-        df = pd.read_sql(sql, c, params=params)
-    return df
+        # pandas 會提示 SQLAlchemy，這裡沿用 psycopg2 以保持你原設計
+        return pd.read_sql(sql, c, params=params)
 
-def load_sources_db(start: date, end: date) -> Dict[str, Optional[pd.DataFrame]]:
-    p = (start, end)
+def load_all_sources_between(start_date: date, end_date: date) -> dict[str, pd.DataFrame]:
+    p = (start_date, end_date)
 
     spot = _read("""
         select exchange, symbol, ts_utc, date_utc, open, high, low, close, volume_usd
@@ -27,7 +28,7 @@ def load_sources_db(start: date, end: date) -> Dict[str, Optional[pd.DataFrame]]
         where date_utc between %s and %s
     """, p)
 
-    oi_agg = _read("""
+    oi = _read("""
         select symbol, ts_utc, date_utc, open, high, low, close, unit
         from futures_oi_agg_1d
         where date_utc between %s and %s
@@ -93,6 +94,30 @@ def load_sources_db(start: date, end: date) -> Dict[str, Optional[pd.DataFrame]]
         where date_utc between %s and %s
     """, p)
 
+    etf_flow = _read("""
+        select date_utc, total_flow_usd, price_usd, details
+        from etf_bitcoin_flow_1d
+        where date_utc between %s and %s
+    """, p)
+
+    etf_aum = _read("""
+        select date_utc, net_assets_usd, change_usd, price_usd
+        from etf_bitcoin_net_assets_1d
+        where date_utc between %s and %s
+    """, p)
+
+    etf_prem = _read("""
+        select date_utc, ticker, nav_usd, market_price_usd, premium_discount
+        from etf_premium_discount_1d
+        where date_utc between %s and %s
+    """, p)
+
+    etf_hk = _read("""
+        select date_utc, total_flow_usd, price_usd, details
+        from hk_etf_flow_1d
+        where date_utc between %s and %s
+    """, p)
+
     cpi = _read("""
         select ts_utc, date_utc, premium_usd, premium_rate
         from coinbase_premium_index_1d
@@ -130,23 +155,12 @@ def load_sources_db(start: date, end: date) -> Dict[str, Optional[pd.DataFrame]]
     """, p)
 
     return {
-        "spot": spot,
-        "fut": fut,
-        "oi_agg": oi_agg,
-        "oi_stable": oi_stable,
-        "oi_coinm": oi_coinm,
-        "funding_oiw": funding_oiw,
-        "funding_volw": funding_volw,
-        "lsr_g": lsr_g,
-        "lsr_a": lsr_a,
-        "lsr_p": lsr_p,
-        "ob": ob,
-        "taker": taker,
-        "liq": liq,
-        "cpi": cpi,
-        "bfx": bfx,
-        "bir": bir,
-        "puell": puell,
-        "s2f": s2f,
-        "pi": pi,
+        "spot": spot, "fut": fut,
+        "oi": oi, "oi_stable": oi_stable, "oi_coinm": oi_coinm,
+        "funding_oiw": funding_oiw, "funding_volw": funding_volw,
+        "lsr_g": lsr_g, "lsr_a": lsr_a, "lsr_p": lsr_p,
+        "ob": ob, "taker": taker, "liq": liq,
+        "etf_flow": etf_flow, "etf_aum": etf_aum, "etf_prem": etf_prem, "etf_hk": etf_hk,
+        "cpi": cpi, "bfx": bfx, "bir": bir,
+        "puell": puell, "s2f": s2f, "pi": pi,
     }

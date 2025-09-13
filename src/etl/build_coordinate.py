@@ -1,138 +1,130 @@
 # -*- coding: utf-8 -*-
+"""
+建骨幹價格座標 + 左連各來源。
+此檔只服務特徵 ETL，不改動任何原始表。
+"""
+from __future__ import annotations
 import pandas as pd
-from typing import Dict, Optional, List
 
-def _norm_sym(s: pd.Series) -> pd.Series:
-    out = s.astype(str).str.upper()
-    out = out.str.replace(":USDT", "", regex=False)
-    out = out.str.replace("USDT", "", regex=False)
-    return out
+BASE_KEYS = ["asset","ts_utc","date_utc"]
 
-def build_price_coordinate(fut: Optional[pd.DataFrame], spot: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """
-    以期貨為主、現貨為輔建立價格座標（asset, ts_utc, date_utc）。
-    不變更你的原始資料，只在欄位層面 rename 成 px_* 方便後續特徵計算。
-    """
-    frames: List[pd.DataFrame] = []
-
-    if fut is not None and len(fut):
-        f = fut.copy()
-        f["asset"] = _norm_sym(f["symbol"])
-        f = f[["asset","ts_utc","date_utc","open","high","low","close","volume_usd"]]
-        f = f.rename(columns={
-            "open":"px_open","high":"px_high","low":"px_low","close":"px_close","volume_usd":"vol_usd"
-        })
-        frames.append(f)
-
-    if spot is not None and len(spot):
-        s = spot.copy()
-        s["asset"] = _norm_sym(s["symbol"])
-        s = s[["asset","ts_utc","date_utc","open","high","low","close","volume_usd"]]
-        s = s.rename(columns={
-            "open":"px_open_s","high":"px_high_s","low":"px_low_s","close":"px_close_s","volume_usd":"vol_usd_s"
-        })
-        frames.append(s)
-
-    if not frames:
-        return pd.DataFrame(columns=["asset","ts_utc","date_utc","px_open","px_high","px_low","px_close","vol_usd"])
-
-    base = frames[0]
-    for f in frames[1:]:
-        base = base.merge(f, how="outer", on=["asset","ts_utc","date_utc"])
-
-    # 期貨優先，沒有再用現貨
-    for k in ["px_open","px_high","px_low","px_close","vol_usd"]:
-        sfx = "" if k != "vol_usd" else ""
-        base[k] = base.get(k, pd.Series(index=base.index))
-        alt = base.get(k + "_s")
-        base[k] = base[k].where(base[k].notna(), alt)
-        if k + "_s" in base:
-            base = base.drop(columns=[k+"_s"])
-
-    base = base.sort_values(["asset","ts_utc"]).reset_index(drop=True)
-    return base[["asset","ts_utc","date_utc","px_open","px_high","px_low","px_close","vol_usd"]]
-
-def _prep_symbol_df(df: pd.DataFrame, keep_cols: List[str]) -> pd.DataFrame:
+def _norm_price(df: pd.DataFrame, src_name: str) -> pd.DataFrame:
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=BASE_KEYS + ["px_open","px_high","px_low","px_close","vol_usd"])
     x = df.copy()
-    if "symbol" in x.columns:
-        x["asset"] = _norm_sym(x["symbol"])
-    if "date_utc" not in x.columns:
-        raise ValueError("來源缺少 date_utc 欄位")
-    cols = [c for c in keep_cols if c in x.columns]
-    cols = (["asset","date_utc"] + (["ts_utc"] if "ts_utc" in x.columns else []) + cols)
-    x = x[cols].drop_duplicates(subset=["asset","date_utc"], keep="last")
-    return x
+    x = x.rename(columns={"symbol":"asset","open":"px_open","high":"px_high","low":"px_low","close":"px_close","volume_usd":"vol_usd"})
+    return x[["asset","ts_utc","date_utc","px_open","px_high","px_low","px_close","vol_usd"]]
 
-def left_join_all(base: pd.DataFrame, S: Dict[str, Optional[pd.DataFrame]]) -> pd.DataFrame:
-    out = base.copy()
+def build_price_coordinate(S: dict[str,pd.DataFrame]) -> pd.DataFrame:
+    spot = _norm_price(S.get("spot"), "spot")
+    fut  = _norm_price(S.get("fut"), "fut")
+    # 以 spot 為主、fut 補值
+    if len(spot) == 0 and len(fut) == 0:
+        return pd.DataFrame(columns=BASE_KEYS + ["px_open","px_high","px_low","px_close","vol_usd"])
+    base = pd.concat([spot, fut], ignore_index=True)
+    base = base.sort_values(["asset","date_utc","ts_utc"]).drop_duplicates(["asset","date_utc"], keep="last")
+    base = base.sort_values(["asset","date_utc"]).reset_index(drop=True)
+    return base
 
-    def j(df: Optional[pd.DataFrame], cols_map: Dict[str,str], label: str):
-        nonlocal out
-        if df is None or not len(df): 
-            return
-        keep = list(cols_map.keys())
-        x = _prep_symbol_df(df, keep_cols=keep)
-        x = x.rename(columns=cols_map)
-        before_cols = set(out.columns)
-        out = out.merge(x.drop(columns=[c for c in ["ts_utc"] if c in x.columns]), how="left", on=["asset","date_utc"])
-        added = [c for c in out.columns if c not in before_cols]
-        print(f"[merge_on_base] before join: df={len(base)}, other={len(x)}, cols={added}")
-        print(f"[merge_on_base] after join: out={len(out)}, added_cols={added}")
-        return out
-
-    # ===== OI =====
-    out = j(S.get("oi_agg"),    {"close":"oi_agg_close"},      "oi_agg") or out
-    out = j(S.get("oi_stable"), {"close":"oi_stable_close"},   "oi_stable") or out
-    out = j(S.get("oi_coinm"),  {"close":"oi_coinm_close"},    "oi_coinm") or out
-
-    # ===== Funding =====
-    out = j(S.get("funding_oiw"),   {"close":"funding_oiw_close"},  "funding_oiw") or out
-    out = j(S.get("funding_volw"),  {"close":"funding_volw_close"}, "funding_volw") or out
-
-    # ===== L/S Ratio =====
-    out = j(S.get("lsr_g"), {"long_short_ratio":"lsr_global"}, "lsr_global") or out
-    out = j(S.get("lsr_a"), {"long_short_ratio":"lsr_top_accounts"}, "lsr_top_accounts") or out
-    out = j(S.get("lsr_p"), {"long_short_ratio":"lsr_top_positions"}, "lsr_top_positions") or out
-
-    # ===== Orderbook / Taker / Liquidations =====
-    out = j(S.get("ob"),    {"bids_usd":"ob_bids_usd","asks_usd":"ob_asks_usd","bids_qty":"ob_bids_qty","asks_qty":"ob_asks_qty"}, "ob") or out
-    out = j(S.get("taker"), {"buy_vol_usd":"taker_buy_usd","sell_vol_usd":"taker_sell_usd"}, "taker") or out
-    out = j(S.get("liq"),   {"long_liq_usd":"liq_long_usd","short_liq_usd":"liq_short_usd"}, "liq") or out
-
-    # ===== Coinbase Premium：BTC 專屬（沒有 symbol），指派到 BTC =====
-    if S.get("cpi") is not None and len(S["cpi"]):
-        x = S["cpi"].copy()
-        x["asset"] = "BTC"
-        x = x[["asset","date_utc","premium_rate"]].rename(columns={"premium_rate":"cpi_premium_rate"})
-        before_cols = set(out.columns)
-        out = out.merge(x, how="left", on=["asset","date_utc"])
-        added = [c for c in out.columns if c not in before_cols]
-        print(f"[merge_on_base] before join: df={len(base)}, other={len(x)}, cols={added}")
-        print(f"[merge_on_base] after join: out={len(out)}, added_cols={added}")
-
-    # ===== Bitfinex Margin L/S =====
-    out = j(S.get("bfx"), {"long_qty":"bfx_long_qty","short_qty":"bfx_short_qty"}, "bfx") or out
-
-    # ===== Borrow interest rate =====
-    out = j(S.get("bir"), {"interest_rate":"borrow_ir"}, "bir") or out
-
-    # ===== Puell / S2F / PI：BTC 專屬 =====
-    for key, cmap in [
-        ("puell", {"puell_multiple":"puell"}),
-        ("s2f",   {"next_halving":"s2f_next_halving"}),
-        ("pi",    {"ma_110":"pi_ma110","ma_350_x2":"pi_ma350x2"}),
-    ]:
-        df = S.get(key)
-        if df is not None and len(df):
-            x = df.copy()
-            x["asset"] = "BTC"
-            keep_map = {k:v for k,v in cmap.items() if k in x.columns}
-            cols = ["asset","date_utc"] + list(keep_map.keys())
-            x = x[cols].rename(columns=keep_map)
-            before_cols = set(out.columns)
-            out = out.merge(x, how="left", on=["asset","date_utc"])
-            added = [c for c in out.columns if c not in before_cols]
-            print(f"[merge_on_base] before join: df={len(base)}, other={len(x)}, cols={added}")
-            print(f"[merge_on_base] after join: out={len(out)}, added_cols={added}")
-
+def _merge_on_base(base: pd.DataFrame, other: pd.DataFrame, on: list[str], how="left", add_prefix=None, cols_keep=None, log=print):
+    if other is None or len(other) == 0:
+        return base
+    keep_cols = cols_keep if cols_keep is not None else [c for c in other.columns if c not in on]
+    log(f"[merge_on_base] before join: df={len(base)}, other={len(other)}, cols={keep_cols}")
+    out = base.merge(other[on + keep_cols], how=how, on=on)
+    added = keep_cols
+    if add_prefix:
+        rename_map = {c: f"{add_prefix}{c}" for c in keep_cols}
+        out = out.rename(columns=rename_map)
+        added = list(rename_map.values())
+    log(f"[merge_on_base] after join: out={len(out)}, added_cols={added}")
     return out
+
+def left_join_all(base: pd.DataFrame, S: dict[str,pd.DataFrame], log=print) -> pd.DataFrame:
+    df = base.copy()
+
+    # OI 三類
+    if S.get("oi") is not None:
+        oi = S["oi"].rename(columns={"symbol":"asset"})
+        oi = oi[["asset","ts_utc","date_utc","close"]]
+        df = _merge_on_base(df, oi, BASE_KEYS, add_prefix="oi_agg_", cols_keep=["close"], log=log)
+    if S.get("oi_stable") is not None:
+        x = S["oi_stable"].rename(columns={"symbol":"asset"})
+        x = x[["asset","ts_utc","date_utc","close"]]
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix="oi_stable_", cols_keep=["close"], log=log)
+    if S.get("oi_coinm") is not None:
+        x = S["oi_coinm"].rename(columns={"symbol":"asset"})
+        x = x[["asset","ts_utc","date_utc","close"]]
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix="oi_coinm_", cols_keep=["close"], log=log)
+
+    # funding
+    if S.get("funding_oiw") is not None:
+        x = S["funding_oiw"].rename(columns={"symbol":"asset"})
+        x = x[["asset","ts_utc","date_utc","close"]]
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix="funding_oiw_", cols_keep=["close"], log=log)
+
+    if S.get("funding_volw") is not None:
+        x = S["funding_volw"].rename(columns={"symbol":"asset"})
+        x = x[["asset","ts_utc","date_utc","close"]]
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix="funding_volw_", cols_keep=["close"], log=log)
+
+    # long/short 三張合併後傳進來
+    if S.get("lsr") is not None and len(S["lsr"]):
+        x = S["lsr"].rename(columns={"symbol":"asset"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix=None, cols_keep=[c for c in x.columns if c not in ["asset","ts_utc","date_utc"]], log=log)
+
+    # orderbook
+    if S.get("ob") is not None:
+        x = S["ob"].rename(columns={"symbol":"asset"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix="ob_", cols_keep=["bids_usd","asks_usd","bids_qty","asks_qty"], log=log)
+
+    # taker
+    if S.get("taker") is not None:
+        x = S["taker"].rename(columns={"symbol":"asset"})
+        x = x.rename(columns={"buy_vol_usd":"taker_buy_usd","sell_vol_usd":"taker_sell_usd"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix=None, cols_keep=["taker_buy_usd","taker_sell_usd"], log=log)
+
+    # liquidation
+    if S.get("liq") is not None:
+        x = S["liq"].rename(columns={"symbol":"asset"})
+        x = x.rename(columns={"long_liq_usd":"liq_long_usd","short_liq_usd":"liq_short_usd"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix=None, cols_keep=["liq_long_usd","liq_short_usd"], log=log)
+
+    # CPI (coinbase premium index)
+    if S.get("cpi") is not None:
+        x = S["cpi"].copy()
+        x["asset"] = "BTC"  # 該指標只對 BTC，有值就貼在 BTC 上
+        x = x[["asset","ts_utc","date_utc","premium_rate"]]
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix="cpi_", cols_keep=["premium_rate"], log=log)
+
+    # Bitfinex margin L/S
+    if S.get("bfx") is not None:
+        x = S["bfx"].rename(columns={"symbol":"asset"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix="bfx_", cols_keep=["long_qty","short_qty"], log=log)
+
+    # Borrow interest rate
+    if S.get("bir") is not None:
+        x = S["bir"].rename(columns={"symbol":"asset"})
+        x = x.rename(columns={"interest_rate":"borrow_ir"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix=None, cols_keep=["borrow_ir"], log=log)
+
+    # Macro/indices (BTC 專屬)
+    if S.get("puell") is not None:
+        x = S["puell"].copy()
+        x["asset"] = "BTC"
+        x = x.rename(columns={"puell_multiple":"puell"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix=None, cols_keep=["puell"], log=log)
+
+    if S.get("s2f") is not None:
+        x = S["s2f"].copy()
+        x["asset"] = "BTC"
+        x = x.rename(columns={"next_halving":"s2f_next_halving"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix=None, cols_keep=["s2f_next_halving"], log=log)
+
+    if S.get("pi") is not None:
+        x = S["pi"].copy()
+        x["asset"] = "BTC"
+        x = x.rename(columns={"ma_110":"pi_ma110","ma_350_x2":"pi_ma350x2"})
+        df = _merge_on_base(df, x, BASE_KEYS, add_prefix=None, cols_keep=["pi_ma110","pi_ma350x2"], log=log)
+
+    return df
