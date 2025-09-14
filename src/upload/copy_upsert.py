@@ -19,14 +19,14 @@ import psycopg2
 from psycopg2 import sql
 
 
-# ---------- helpers ----------
+# ---------- DB meta ----------
 
 def _fetch_table_columns(conn, schema: str, table: str) -> pd.DataFrame:
     q = """
     SELECT
       column_name,
       data_type,
-      COALESCE(is_generated,'NEVER') AS is_generated
+      is_generated
     FROM information_schema.columns
     WHERE table_schema = %s AND table_name = %s
     ORDER BY ordinal_position
@@ -35,10 +35,10 @@ def _fetch_table_columns(conn, schema: str, table: str) -> pd.DataFrame:
 
 
 def _pg_cast_for(datatype: str) -> str:
-    dt = (datatype or "").lower().strip()
+    dt = datatype.lower().strip()
     if dt == "timestamp with time zone":
         return "timestamptz"
-    if dt == "timestamp without time zone":
+    if dt in ("timestamp without time zone",):
         return "timestamp"
     if dt in ("double precision", "real", "numeric", "decimal"):
         return "double precision"
@@ -50,21 +50,20 @@ def _pg_cast_for(datatype: str) -> str:
         return "jsonb" if dt == "jsonb" else "json"
     if dt in ("date",):
         return "date"
-    # 其餘一律以 text 接
     return "text"
 
+
+# ---------- SQL helpers ----------
 
 def _ident(name: str) -> sql.Identifier:
     return sql.Identifier(name)
 
-
 def _join_ident(names: Iterable[str]) -> sql.SQL:
     return sql.SQL(", ").join([_ident(n) for n in names])
 
-
 def _join_values_with_cast(cols: List[str], cast_map: Dict[str, str]) -> sql.SQL:
     """
-    生成 SELECT 子句：NULLIF("col",'')::<cast> AS "col"
+    產生 SELECT 子句：NULLIF("col",'')::<cast> AS "col"
     """
     parts = []
     for c in cols:
@@ -78,16 +77,17 @@ def _join_values_with_cast(cols: List[str], cast_map: Dict[str, str]) -> sql.SQL
     return sql.SQL(", ").join(parts)
 
 
+# ---------- Data helpers ----------
+
 def _df_to_csv_buf(df: pd.DataFrame) -> io.StringIO:
     buf = io.StringIO()
-    # NaN -> ''，COPY 時由 NULLIF 轉成 NULL
+    # NaN -> ''，COPY 時會被 NULLIF 處理成 NULL
     df.to_csv(buf, index=False, header=False, na_rep="")
     buf.seek(0)
     return buf
 
-
 def _split_by_asset_year(df: pd.DataFrame) -> List[pd.DataFrame]:
-    """依 (asset, 年) 切分，避免一次過大並利於 LOG。"""
+    """將 df 依 (asset, 年) 切小塊。"""
     if "asset" not in df.columns or "ts_utc" not in df.columns:
         return [df]
     x = df.copy()
@@ -99,7 +99,7 @@ def _split_by_asset_year(df: pd.DataFrame) -> List[pd.DataFrame]:
     return groups
 
 
-# ---------- main ----------
+# ---------- Public: COPY → UPSERT ----------
 
 def copy_upsert_chunks(
     conn,
@@ -117,33 +117,39 @@ def copy_upsert_chunks(
         log(f"[upload] 無資料可上傳：{schema}.{table}")
         return
 
-    # 讀目標表欄位
+    # 讀取目標表欄位資訊
     cols_meta = _fetch_table_columns(conn, schema, table)
     table_cols = cols_meta["column_name"].tolist()
     gen_cols = cols_meta.loc[cols_meta["is_generated"].str.upper() == "ALWAYS", "column_name"].tolist()
-
-    # 排除 GENERATED 與 updated_at（交給 default/trigger）
-    exclude_cols = set(gen_cols + ["updated_at"])
+    exclude_cols = set(gen_cols + ["updated_at"])  # 讓 default/trigger 處理
 
     # 只取交集欄位
     usable_cols = [c for c in df.columns if c in table_cols and c not in exclude_cols]
     if not usable_cols:
         raise ValueError(f"[upload] 找不到可上傳欄位（df={list(df.columns)} 與表 {schema}.{table} 的交集為空）")
 
-    # CAST 對應
+    # 準備 CAST 對應
+    cast_map: Dict[str, str] = {}
     meta_map = {r["column_name"]: r["data_type"] for _, r in cols_meta.iterrows()}
-    cast_map: Dict[str, str] = {c: _pg_cast_for(meta_map[c]) for c in usable_cols}
+    for c in usable_cols:
+        cast_map[c] = _pg_cast_for(meta_map[c])
 
-    # 只保留可用欄位
+    # 先將 df 只留用得到的欄位
     df = df[usable_cols].copy()
 
-    # 時間欄位（若有）統一格式字串（ISO，含時區），讓 INSERT 階段再 CAST 成 timestamptz
+    # 預處理：timestamptz 與整數欄位
     if "ts_utc" in df.columns:
         ts = pd.to_datetime(df["ts_utc"], utc=True, errors="coerce")
-        # 以  RFC3339-ish 格式（: 分隔時區偏移），Postgres 皆可解析
+        # 轉 ISO（含時區），%z 會是 +0000；轉成 +00:00 讓解析更直覺
         df["ts_utc"] = ts.dt.strftime("%Y-%m-%dT%H:%M:%S%z").str.replace(
             r"(\+|\-)(\d{2})(\d{2})$", r"\1\2:\3", regex=True
         )
+
+    # 將 integer 型別的欄位，避免出現 '123.0' 無法 CAST integer
+    for c in usable_cols:
+        if meta_map[c].lower() in ("integer", "bigint", "smallint"):
+            s = pd.to_numeric(df[c], errors="coerce")
+            df[c] = s.round(0).astype("Int64")  # 仍可輸出為 '' 代表 NULL
 
     groups = _split_by_asset_year(df)
     log(f"[run] 開始上傳 {schema}.{table}，共 {len(groups)} 組（資產×年）…")
@@ -161,30 +167,31 @@ def copy_upsert_chunks(
                     if len(part) == 0:
                         continue
 
-                    # 臨時表（text 欄位）
+                    # 臨時表（全部 text）
                     tmp_name = f"tmp_copy_{table}_{gi}_{ci}"
-                    col_defs = [sql.SQL("{} text").format(_ident(c)) for c in usable_cols]
+                    col_defs = sql.SQL(", ").join([sql.SQL("{} text").format(_ident(c)) for c in usable_cols])
                     cur.execute(
-                        sql.SQL("CREATE TEMP TABLE {tmp} ( {cols} ) ON COMMIT DROP").format(
-                            tmp=_ident(tmp_name),
-                            cols=sql.SQL(", ").join(col_defs),
-                        )
+                        sql.SQL("CREATE TEMP TABLE {tmp} ( {cols} ) ON COMMIT DROP")
+                        .format(tmp=_ident(tmp_name), cols=col_defs)
                     )
 
-                    # COPY 進臨時表（無 HEADER）
+                    # COPY 進臨時表
                     buf = _df_to_csv_buf(part)
-                    copy_sql = sql.SQL("COPY {tmp} ({cols}) FROM STDIN WITH (FORMAT CSV, NULL '')").format(
+                    copy_sql = sql.SQL("COPY {tmp} ({cols}) FROM STDIN WITH (FORMAT CSV, HEADER FALSE, NULL '')").format(
                         tmp=_ident(tmp_name),
                         cols=_join_ident(usable_cols),
                     )
                     cur.copy_expert(copy_sql.as_string(cur), buf)
 
                     # INSERT ... ON CONFLICT（精準 CAST）
-                    key_cols = list(pk)
                     insert_cols = usable_cols
-                    update_cols = [c for c in insert_cols if c not in key_cols]
+                    key_cols = list(pk)
+                    upd_cols = [c for c in insert_cols if c not in key_cols]
 
                     select_list = _join_values_with_cast(insert_cols, cast_map)
+                    update_list = sql.SQL(", ").join([
+                        sql.SQL("{col} = EXCLUDED.{col}").format(col=_ident(c)) for c in upd_cols
+                    ])
 
                     insert_sql = sql.SQL("""
                         INSERT INTO {sch}.{tbl} ({cols})
@@ -200,9 +207,7 @@ def copy_upsert_chunks(
                         select_list=select_list,
                         tmp=_ident(tmp_name),
                         pkeys=_join_ident(key_cols),
-                        updates=sql.SQL(", ").join([
-                            sql.SQL("{col} = EXCLUDED.{col}").format(col=_ident(c)) for c in update_cols
-                        ]) if update_cols else sql.SQL(""),
+                        updates=update_list
                     )
 
                     cur.execute(insert_sql)
