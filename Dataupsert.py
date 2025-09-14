@@ -16,6 +16,8 @@ from psycopg2.extras import execute_values
 import socket
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
+REPORT = []
+
 # -------- .env --------
 try:
     from dotenv import load_dotenv
@@ -332,7 +334,7 @@ def pg():
 def upsert(conn, sql: str, rows: List[Tuple], table_label: str):
     if not rows:
         log(f"[{table_label}] 無資料可寫入")
-        return
+        return 0
     total = 0
     with conn.cursor() as cur:
         for i in range(0, len(rows), MAX_INSERT):
@@ -341,6 +343,7 @@ def upsert(conn, sql: str, rows: List[Tuple], table_label: str):
             total += len(part)
     conn.commit()
     log(f"[{table_label}] upsert rows = {total}")
+    return total
 
 def db_ping(conn):
     with conn.cursor() as cur:

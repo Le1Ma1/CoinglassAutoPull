@@ -1,0 +1,46 @@
+name: Dataupsert daily
+
+on:
+  schedule:
+    - cron: '1 0 * * *'   # UTC 00:01
+    - cron: '5 0 * * *'   # UTC 00:05
+  workflow_dispatch: {}
+
+concurrency:
+  group: dataupsert
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - run: |
+          python -V
+          pip install --upgrade pip
+          pip install requests psycopg2-binary python-dotenv
+      - name: Ingest last 3 days (all tasks)
+        env:
+          # 必填機密
+          CG_API_KEY: ${{ secrets.CG_API_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # 節流與批量（可保留預設）
+          CG_QPM: '80'
+          CG_API_LIMIT: '4500'
+          DB_BATCH_LIMIT: '20000'
+          # 幣與交易所（可依需要調整）
+          CG_COINS: 'BTC,ETH,XRP,BNB,SOL,DOGE,ADA'
+          CG_EXCHANGES: 'Binance'
+          CG_EXLISTS: 'Binance,OKX,Bybit'
+          # 不設 CG_TASKS → 全任務都跑
+        run: |
+          export START_DATE="$(date -u -d '3 days ago' +%F)"
+          export END_DATE="$(date -u -d 'yesterday' +%F)"
+          echo "Window: ${START_DATE} ~ ${END_DATE}"
+          python -m Dataupsert
