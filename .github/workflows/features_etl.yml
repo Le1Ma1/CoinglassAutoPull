@@ -33,14 +33,10 @@ jobs:
       - name: Compute SINCE=UTC today-7d
         id: since
         run: |
-          SINCE=$(python - <<'PY'
-from datetime import datetime, timedelta, timezone
-print((datetime.now(timezone.utc)-timedelta(days=7)).date())
-PY
-)
-          echo "since=$SINCE" >> $GITHUB_OUTPUT
+          SINCE=$(date -u -d '7 days ago' +%F)
+          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
           echo "SINCE=$SINCE"
 
-      - name: Run features ETL (last 7 days with 400d warmup)
+      - name: Run features ETL (last 7 days with warmup)
         run: |
           python -m featuresETL --since "${{ steps.since.outputs.since }}"
