@@ -1,22 +1,24 @@
-name: features-etl-7d
+name: features-etl-full
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # 00:05 UTC
-    - cron: "11 0 * * *"  # 00:11 UTC
+    - cron: "5 0 * * *"    # 00:05 UTC
+    - cron: "11 0 * * *"   # 00:11 UTC
   workflow_dispatch: {}
 
 concurrency:
-  group: features-etl
+  group: features-etl-full
   cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}  # 必填：在 repo Secrets 設定
       PGSSLMODE: require
+      # ASSETS 可留空表示全資產；若需限制資產就在 repo Variables/Secrets 設定 ASSETS 例如 "BTC,ETH"
+      ASSETS: ${{ vars.ASSETS }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,15 +30,11 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install -U pip
-          pip install numpy pandas psycopg2-binary SQLAlchemy python-dotenv
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install numpy pandas psycopg2-binary python-dotenv SQLAlchemy
+          fi
 
-      - name: Compute SINCE=UTC today-7d
-        id: since
-        run: |
-          SINCE=$(date -u -d '7 days ago' +%F)
-          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
-          echo "SINCE=$SINCE"
-
-      - name: Run features ETL (last 7 days with warmup)
-        run: |
-          python -m featuresETL --since "${{ steps.since.outputs.since }}"
+      - name: Run full-history ETL
+        run: python -m featuresETL
