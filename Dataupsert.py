@@ -776,6 +776,12 @@ def ingest_indices_daily(conn):
         rows.append((date_utc, fnum(first(it,"price","price_usd")), fnum(first(it,"ma_110")), fnum(ma350x2)))
     upsert(conn, sql_pi, rows, t3)
 
+# 匯入新 ETL
+from src.etl_raw.futures_basis_1d import ingest_futures_basis_1d
+from src.etl_raw.futures_whale_index_1d import ingest_futures_whale_index_1d
+from src.etl_raw.futures_cgdi_index_1d import ingest_futures_cgdi_index_1d
+from src.etl_raw.futures_cdri_index_1d import ingest_futures_cdri_index_1d
+
 # -------- 入口 --------
 TASKS = [x.strip() for x in getenv_any(["CG_TASKS","TASKS"], "").split(",") if x.strip()]
 
@@ -800,9 +806,15 @@ def run_all():
         ("etf_premium_discount_1d",        lambda: ingest_etf_premium_discount(conn, tickers=None)),
         ("hk_etf_flow_1d",                 lambda: ingest_hk_etf_flow(conn)),
         ("coinbase_premium_index_1d",      lambda: ingest_coinbase_premium_index_1d(conn)),
-        ("bitfinex_margin_long_short_1d",  lambda: ingest_bitfinex_margin_ls_1d(conn)),  # 預設用 COINS
+        ("bitfinex_margin_long_short_1d",  lambda: ingest_bitfinex_margin_ls_1d(conn)),
         ("borrow_interest_rate_1d",        lambda: ingest_borrow_ir_1d(conn)),
         ("indices_daily",                  lambda: ingest_indices_daily(conn)),
+
+        # <<< 新增的四個擴充任務 >>>
+        ("futures_basis_1d",               lambda: ingest_futures_basis_1d(conn)),
+        ("futures_whale_index_1d",         lambda: ingest_futures_whale_index_1d(conn)),
+        ("futures_cgdi_index_1d",          lambda: ingest_futures_cgdi_index_1d(conn)),
+        ("futures_cdri_index_1d",          lambda: ingest_futures_cdri_index_1d(conn)),
     ]
 
     for name, fn in pipeline:

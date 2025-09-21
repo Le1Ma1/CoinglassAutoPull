@@ -360,7 +360,7 @@ def upsert_features(conn, asset: str, df_scored: pd.DataFrame, score_ver: int = 
             float(row["score_vol"]) if pd.notna(row["score_vol"]) else None,
             float(row["score_volume"]) if pd.notna(row["score_volume"]) else None,
             score_ver,
-            json.dumps({})  # ext_features 留空
+            json.dumps({})  # 讓 INSERT 帶空物件，但不會清掉既有鍵
         ))
     sql = """
     insert into public.features_1d
@@ -380,13 +380,16 @@ def upsert_features(conn, asset: str, df_scored: pd.DataFrame, score_ver: int = 
        score_vol   = excluded.score_vol,
        score_volume = excluded.score_volume,
        score_ver = excluded.score_ver,
-       ext_features = excluded.ext_features,
-       updated_at = now()
+       -- 關鍵：只合併，不覆蓋其他 JSON 鍵
+       ext_features = coalesce(public.features_1d.ext_features,'{}'::jsonb)
+                      || coalesce(excluded.ext_features,'{}'::jsonb),
+       updated_at = now();
     """
     with conn.cursor() as cur:
         execute_values(cur, sql, rows, page_size=1000)
     conn.commit()
     return len(rows)
+
 
 # ---------------- 主程式 ----------------
 def main():
